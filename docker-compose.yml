@@ -1,0 +1,109 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-callsteering}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - callsteering_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-callsteering}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  embedding-vllm:
+    image: vllm/vllm-openai:latest
+    profiles:
+      - vllm
+    command:
+      - --model
+      - ${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-8B}
+      - --served-model-name
+      - ${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-8B}
+      - --trust-remote-code
+      - --port
+      - "8000"
+      - --max-model-len
+      - "${VLLM_MAX_MODEL_LEN:-8192}"
+      - --dtype
+      - ${VLLM_DTYPE:-auto}
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    ports:
+      - "18001:8000"
+    shm_size: "8gb"
+
+  embeddings-cpu:
+    build:
+      context: ./model-serving/embeddings-cpu
+      dockerfile: Dockerfile
+    profiles:
+      - cpu
+    restart: unless-stopped
+    environment:
+      - EMBEDDING_CPU_MODEL_NAME=${EMBEDDING_CPU_MODEL_NAME:-jinaai/jina-embeddings-v3}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-local-dev-key}
+      - EMBEDDING_MAX_BATCH_SIZE=${EMBEDDING_MAX_BATCH_SIZE:-128}
+      - EMBEDDING_MAX_INPUT_CHARS=${EMBEDDING_MAX_INPUT_CHARS:-8192}
+    ports:
+      - "18003:8000"
+
+  model-gateway:
+    build:
+      context: ./model-serving/gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - EMBEDDING_BACKEND_MODE=${EMBEDDING_BACKEND_MODE:-transformers_cpu}
+      - EMBEDDING_VLLM_BASE_URL=${EMBEDDING_VLLM_BASE_URL:-http://embedding-vllm:8000/v1}
+      - EMBEDDING_CPU_BASE_URL=${EMBEDDING_CPU_BASE_URL:-http://embeddings-cpu:8000/v1}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-local-dev-key}
+      - GATEWAY_API_KEY=${GATEWAY_API_KEY:-local-dev-key}
+      - WHISPER_MODEL_NAME=${WHISPER_MODEL_NAME:-openai/whisper-large-v3}
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-8B}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-26214400}
+    ports:
+      - "${MODEL_GATEWAY_HOST_PORT:-8002}:8000"
+
+  backend:
+    image: python:3.11-slim
+    working_dir: /app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      model-gateway:
+        condition: service_started
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://postgres:postgres@postgres:5432/callsteering}
+      - STT_ENGINE=${STT_ENGINE:-openai_compatible}
+      - EMBEDDING_ENGINE=${EMBEDDING_ENGINE:-openai_compatible}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-http://model-gateway:8000/v1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-local-dev-key}
+      - WHISPER_MODEL_NAME=${WHISPER_MODEL_NAME:-openai/whisper-large-v3}
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-8B}
+      - API_KEY=${API_KEY:-}
+    command: >
+      sh -c "pip install --no-cache-dir -e . &&
+             alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    volumes:
+      - ./:/app
+      - callsteering_audio_data:/app/data/audio
+    ports:
+      - "${BACKEND_HOST_PORT:-18000}:8000"
+
+volumes:
+  callsteering_postgres_data:
+  callsteering_audio_data:

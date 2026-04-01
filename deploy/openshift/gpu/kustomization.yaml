@@ -1,0 +1,59 @@
+resources:
+  - ../base
+patches:
+  - target:
+      kind: Deployment
+      name: callsteering-api
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: cuda
+  - target:
+      kind: Deployment
+      name: callsteering-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: cuda
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          nvidia.com/gpu.present: "true"
+  - target:
+      kind: Deployment
+      name: callsteering-model-gateway
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/2/value
+        value: cuda
+      - op: replace
+        path: /spec/template/spec/containers/0/env/3/value
+        value: float16
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          nvidia.com/gpu.present: "true"
+  - target:
+      kind: Deployment
+      name: embedding-vllm
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          nvidia.com/gpu.present: "true"
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "4"
+            memory: "24Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "8"
+            memory: "32Gi"
+            nvidia.com/gpu: "1"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: VLLM_ATTENTION_BACKEND
+          value: FLASH_ATTN

@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: callsteering-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: callsteering-worker
+  template:
+    metadata:
+      labels:
+        app: callsteering-worker
+    spec:
+      containers:
+        - name: worker
+          image: callsteering-backend:latest
+          env:
+            - name: INFERENCE_DEVICE
+              value: auto
+            - name: STT_ENGINE
+              value: openai_compatible
+            - name: EMBEDDING_ENGINE
+              value: openai_compatible
+            - name: OPENAI_BASE_URL
+              value: http://callsteering-model-gateway/v1
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: callsteering-model-credentials
+                  key: OPENAI_API_KEY
+            - name: WHISPER_MODEL_NAME
+              value: openai/whisper-large-v3
+            - name: EMBEDDING_MODEL_NAME
+              value: Qwen/Qwen3-Embedding-8B

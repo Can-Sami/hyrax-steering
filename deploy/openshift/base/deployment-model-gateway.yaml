@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: callsteering-model-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: callsteering-model-gateway
+  template:
+    metadata:
+      labels:
+        app: callsteering-model-gateway
+    spec:
+      containers:
+        - name: model-gateway
+          image: callsteering-model-gateway:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: WHISPER_MODEL_NAME
+              value: openai/whisper-large-v3
+            - name: EMBEDDING_MODEL_NAME
+              value: Qwen/Qwen3-Embedding-8B
+            - name: WHISPER_DEVICE
+              value: cpu
+            - name: WHISPER_COMPUTE_TYPE
+              value: int8
+            - name: EMBEDDING_BASE_URL
+              value: http://embedding-vllm:8000/v1
+            - name: EMBEDDING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: callsteering-model-credentials
+                  key: EMBEDDING_API_KEY
+            - name: GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: callsteering-model-credentials
+                  key: GATEWAY_API_KEY
+            - name: APP_ENV
+              value: dev
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000

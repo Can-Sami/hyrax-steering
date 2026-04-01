@@ -1,0 +1,55 @@
+resources:
+  - ../base
+patches:
+  - target:
+      kind: Deployment
+      name: callsteering-api
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: cpu
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+  - target:
+      kind: Deployment
+      name: callsteering-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: cpu
+  - target:
+      kind: Deployment
+      name: callsteering-model-gateway
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/2/value
+        value: cpu
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "2"
+            memory: "8Gi"
+          limits:
+            cpu: "4"
+            memory: "16Gi"
+  - target:
+      kind: Deployment
+      name: embedding-vllm
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "2"
+            memory: "12Gi"
+          limits:
+            cpu: "4"
+            memory: "16Gi"

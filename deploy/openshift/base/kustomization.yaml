@@ -1,0 +1,9 @@
+resources:
+  - deployment-api.yaml
+  - deployment-worker.yaml
+  - deployment-model-gateway.yaml
+  - deployment-embedding-vllm.yaml
+  - service.yaml
+  - service-model-gateway.yaml
+  - service-embedding-vllm.yaml
+  - secret-model-credentials.yaml

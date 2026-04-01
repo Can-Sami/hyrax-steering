@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: callsteering-model-gateway
+spec:
+  selector:
+    app: callsteering-model-gateway
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000

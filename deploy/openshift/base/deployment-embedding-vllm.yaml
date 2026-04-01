@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embedding-vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: embedding-vllm
+  template:
+    metadata:
+      labels:
+        app: embedding-vllm
+    spec:
+      containers:
+        - name: embedding-vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model
+            - Qwen/Qwen3-Embedding-8B
+            - --served-model-name
+            - Qwen/Qwen3-Embedding-8B
+            - --port
+            - "8000"
+            - --max-model-len
+            - "8192"
+          ports:
+            - containerPort: 8000
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              value: ""

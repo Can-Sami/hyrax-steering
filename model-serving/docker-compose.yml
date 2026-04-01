@@ -1,0 +1,72 @@
+services:
+  embedding-vllm:
+    image: vllm/vllm-openai:latest
+    profiles:
+      - vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              device_ids:
+                - nvidia.com/gpu=all
+              capabilities:
+                - gpu
+    command:
+      - --model
+      - ${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-8B}
+      - --served-model-name
+      - ${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-8B}
+      - --trust-remote-code
+      - --port
+      - "8000"
+      - --max-model-len
+      - "${VLLM_MAX_MODEL_LEN:-8192}"
+      - --dtype
+      - ${VLLM_DTYPE:-auto}
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    ports:
+      - "18001:8000"
+    shm_size: "8gb"
+
+  embeddings-cpu:
+    build:
+      context: ./embeddings-cpu
+      dockerfile: Dockerfile
+    profiles:
+      - cpu
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+    environment:
+      - EMBEDDING_CPU_MODEL_NAME=${EMBEDDING_CPU_MODEL_NAME:-jinaai/jina-embeddings-v3}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-local-dev-key}
+      - EMBEDDING_MAX_BATCH_SIZE=${EMBEDDING_MAX_BATCH_SIZE:-128}
+      - EMBEDDING_MAX_INPUT_CHARS=${EMBEDDING_MAX_INPUT_CHARS:-8192}
+    ports:
+      - "18003:8000"
+
+  model-gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    environment:
+      - EMBEDDING_BACKEND_MODE=${EMBEDDING_BACKEND_MODE:-vllm}
+      - EMBEDDING_VLLM_BASE_URL=${EMBEDDING_VLLM_BASE_URL:-http://embedding-vllm:8000/v1}
+      - EMBEDDING_CPU_BASE_URL=${EMBEDDING_CPU_BASE_URL:-http://embeddings-cpu:8000/v1}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-local-dev-key}
+      - GATEWAY_API_KEY=${GATEWAY_API_KEY:-local-dev-key}
+      - WHISPER_MODEL_NAME=${WHISPER_MODEL_NAME:-openai/whisper-large-v3}
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-8B}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-26214400}
+    ports:
+      - "8002:8000"
