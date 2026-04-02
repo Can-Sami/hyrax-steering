@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,8 +12,8 @@ from app.config.settings import get_settings
 from app.db.session import get_db
 from app.services.audio import AudioValidator
 from app.services.confidence import ConfidencePolicy
-from app.services.repository import EmbeddingRepository, IntentRepository, UtteranceRepository
 from app.services.rerank import TwoStageIntentSearchService
+from app.services.repository import EmbeddingRepository, InferenceRepository, IntentRepository, UtteranceRepository
 from app.services.similarity import SimilaritySearchService
 from app.services.storage import LocalStorageProvider
 from app.workers.pipeline import (
@@ -63,6 +63,28 @@ def _clean_language_code(value: str) -> str:
     if len(cleaned) > 8:
         raise AppError(code='invalid_request', message='language_code is too long.', status_code=400)
     return cleaned
+
+
+def _parse_iso_timestamp(value: str, field_name: str) -> datetime:
+    raw = value.strip()
+    if not raw:
+        raise AppError(code='invalid_request', message=f'{field_name} is required.', status_code=400)
+    normalized = raw[:-1] + '+00:00' if raw.endswith('Z') else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise AppError(code='invalid_request', message=f'{field_name} must be valid ISO timestamp.', status_code=400) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_timeframe(start_at: str, end_at: str) -> tuple[datetime, datetime]:
+    parsed_start = _parse_iso_timestamp(start_at, 'start_at')
+    parsed_end = _parse_iso_timestamp(end_at, 'end_at')
+    if parsed_start >= parsed_end:
+        raise AppError(code='invalid_request', message='start_at must be earlier than end_at.', status_code=400)
+    return parsed_start, parsed_end
 
 
 @router.get('/healthz')
@@ -359,6 +381,7 @@ async def infer_intent(
     _: None = Depends(require_api_key),
     db: Session = Depends(get_db),
 ) -> dict:
+    repository = InferenceRepository(db)
     content = await audio_file.read()
     validator.validate(audio_file.filename or 'audio.wav', content)
     audio_uri = storage.store(audio_file.filename or 'audio.wav', content)
@@ -369,17 +392,69 @@ async def infer_intent(
     confidence_result = confidence_policy.evaluate(candidates)
     match_status = 'low_confidence' if confidence_result.is_low_confidence else 'matched'
     top_intent = confidence_result.top_candidate
+    top_candidates = [{'intent_code': candidate.intent_code, 'score': candidate.score} for candidate in confidence_result.top_k]
+    processing_ms = 120
+    effective_request_id = request_id or str(uuid4())
+    predicted_intent_id = None
+    if match_status == 'matched' and top_intent is not None:
+        matched_intent = repository.get_intent_by_code(top_intent.intent_code)
+        predicted_intent_id = matched_intent.id if matched_intent is not None else None
+
+    try:
+        inference_request = repository.create_request(
+            external_request_id=effective_request_id,
+            language_code=language_hint,
+            audio_uri=audio_uri,
+            transcript=transcript,
+            status=match_status,
+            processing_ms=processing_ms,
+        )
+        repository.create_result(
+            request_id=inference_request.id,
+            predicted_intent_id=predicted_intent_id,
+            confidence=confidence_result.confidence,
+            top_k_json=top_candidates,
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise AppError(code='invalid_request', message='Failed to persist inference result.', status_code=400) from exc
 
     return {
-        'request_id': request_id or str(uuid4()),
+        'request_id': effective_request_id,
         'channel_id': channel_id,
         'intent_code': top_intent.intent_code if top_intent and match_status == 'matched' else None,
         'confidence': confidence_result.confidence,
         'match_status': match_status,
         'transcript': transcript,
-        'top_candidates': [
-            {'intent_code': candidate.intent_code, 'score': candidate.score}
-            for candidate in confidence_result.top_k
-        ],
-        'processing_ms': 120,
+        'top_candidates': top_candidates,
+        'processing_ms': processing_ms,
     }
+
+
+@router.get('/v1/overview/summary')
+def overview_summary(start_at: str, end_at: str, db: Session = Depends(get_db)) -> dict[str, int | float | None]:
+    parsed_start, parsed_end = _parse_timeframe(start_at, end_at)
+    repository = InferenceRepository(db)
+    return repository.summary(parsed_start, parsed_end)
+
+
+@router.get('/v1/overview/intent-distribution')
+def overview_intent_distribution(start_at: str, end_at: str, db: Session = Depends(get_db)) -> dict[str, list[dict[str, int | float | str]]]:
+    parsed_start, parsed_end = _parse_timeframe(start_at, end_at)
+    repository = InferenceRepository(db)
+    return {'items': repository.intent_distribution(parsed_start, parsed_end)}
+
+
+@router.get('/v1/overview/recent-activity')
+def overview_recent_activity(
+    start_at: str,
+    end_at: str,
+    limit: int = Query(default=10),
+    db: Session = Depends(get_db),
+) -> dict[str, list[dict[str, object]]]:
+    parsed_start, parsed_end = _parse_timeframe(start_at, end_at)
+    if limit < 1 or limit > 50:
+        raise AppError(code='invalid_request', message='limit must be between 1 and 50.', status_code=400)
+    repository = InferenceRepository(db)
+    return {'items': repository.recent_activity(parsed_start, parsed_end, limit)}
