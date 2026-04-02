@@ -34,6 +34,17 @@ class _FakeIntent:
         self.updated_at = routes.datetime.now(routes.timezone.utc)
 
 
+class _FakeUtterance:
+    def __init__(self, intent_id, language_code: str, text: str, source: str) -> None:
+        self.id = uuid4()
+        self.intent_id = intent_id
+        self.language_code = language_code
+        self.text = text
+        self.source = source
+        self.created_at = routes.datetime.now(routes.timezone.utc)
+        self.updated_at = routes.datetime.now(routes.timezone.utc)
+
+
 def _fake_embed(text: str) -> list[float]:
     if 'fatura' in text:
         return [0.99] + [0.0] * 1023
@@ -44,6 +55,7 @@ def _fake_embed(text: str) -> list[float]:
 
 def test_intent_crud_and_search(monkeypatch) -> None:
     store: dict[str, _FakeIntent] = {}
+    utterance_store: dict[str, _FakeUtterance] = {}
 
     class FakeIntentRepository:
         def __init__(self, db) -> None:
@@ -75,9 +87,34 @@ def test_intent_crud_and_search(monkeypatch) -> None:
         def __init__(self, db) -> None:
             self.db = db
 
-        def upsert_for_intent(self, intent_id, model_name: str, embedding: list[float]):
-            _ = (intent_id, model_name, embedding)
+        def upsert_for_utterance(self, utterance_id, model_name: str, embedding: list[float]):
+            _ = (utterance_id, model_name, embedding)
             return None
+
+    class FakeUtteranceRepository:
+        def __init__(self, db) -> None:
+            self.db = db
+
+        def by_intent_id(self, intent_id):
+            return [item for item in utterance_store.values() if str(item.intent_id) == str(intent_id)]
+
+        def create(self, intent_id, language_code: str, text: str, source: str):
+            utterance = _FakeUtterance(intent_id=intent_id, language_code=language_code, text=text, source=source)
+            utterance_store[str(utterance.id)] = utterance
+            return utterance
+
+        def get_by_id(self, utterance_id):
+            return utterance_store.get(str(utterance_id))
+
+        def update(self, utterance, language_code: str, text: str, source: str):
+            utterance.language_code = language_code
+            utterance.text = text
+            utterance.source = source
+            utterance.updated_at = routes.datetime.now(routes.timezone.utc)
+            return utterance
+
+        def delete(self, utterance):
+            utterance_store.pop(str(utterance.id), None)
 
     class FakeSimilaritySearchService:
         def __init__(self, db) -> None:
@@ -94,6 +131,7 @@ def test_intent_crud_and_search(monkeypatch) -> None:
     monkeypatch.setattr(routes.pipeline.embedding_provider, 'embed', lambda text: EmbeddingResult(vector=_fake_embed(text)))
     monkeypatch.setattr(routes, 'IntentRepository', FakeIntentRepository)
     monkeypatch.setattr(routes, 'EmbeddingRepository', FakeEmbeddingRepository)
+    monkeypatch.setattr(routes, 'UtteranceRepository', FakeUtteranceRepository)
     monkeypatch.setattr(routes, 'SimilaritySearchService', FakeSimilaritySearchService)
     app.dependency_overrides[routes.get_db] = lambda: _FakeDb()
     client = TestClient(app)
@@ -116,10 +154,31 @@ def test_intent_crud_and_search(monkeypatch) -> None:
     )
     assert update_response.status_code == 200
 
+    create_utterance = client.post(
+        f'/api/v1/intents/{intent_id}/utterances',
+        json={'text': 'Kredi karti borcumu ogrenmek istiyorum', 'language_code': 'tr', 'source': 'manual'},
+    )
+    assert create_utterance.status_code == 200
+    utterance_id = create_utterance.json()['id']
+
+    list_utterances = client.get(f'/api/v1/intents/{intent_id}/utterances')
+    assert list_utterances.status_code == 200
+    assert any(item['id'] == utterance_id for item in list_utterances.json()['items'])
+
+    update_utterance = client.put(
+        f'/api/v1/intents/{intent_id}/utterances/{utterance_id}',
+        json={'text': 'Kart borcum ne kadar?', 'language_code': 'tr', 'source': 'manual'},
+    )
+    assert update_utterance.status_code == 200
+
     search_response = client.post('/api/v1/intents/search', json={'query': 'tarife degistirmek istiyorum', 'k': 3})
     assert search_response.status_code == 200
     assert 'items' in search_response.json()
     assert len(search_response.json()['items']) >= 1
+
+    delete_utterance = client.delete(f'/api/v1/intents/{intent_id}/utterances/{utterance_id}')
+    assert delete_utterance.status_code == 200
+    assert delete_utterance.json()['status'] == 'deleted'
 
     delete_response = client.delete(f'/api/v1/intents/{intent_id}')
     assert delete_response.status_code == 200

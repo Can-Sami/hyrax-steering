@@ -12,7 +12,7 @@ from app.config.settings import get_settings
 from app.db.session import get_db
 from app.services.audio import AudioValidator
 from app.services.confidence import ConfidencePolicy
-from app.services.repository import EmbeddingRepository, IntentRepository
+from app.services.repository import EmbeddingRepository, IntentRepository, UtteranceRepository
 from app.services.similarity import SimilaritySearchService
 from app.services.storage import LocalStorageProvider
 from app.workers.pipeline import (
@@ -43,10 +43,23 @@ class IntentSearchRequest(BaseModel):
     language_hint: str = Field(default='tr')
 
 
+class UtteranceWriteRequest(BaseModel):
+    text: str = Field(min_length=1)
+    language_code: str = Field(default='tr', min_length=2, max_length=8)
+    source: str = Field(default='manual', min_length=1, max_length=64)
+
+
 def _clean_required(value: str, field_name: str) -> str:
     cleaned = value.strip()
     if not cleaned:
         raise AppError(code='invalid_request', message=f'{field_name} cannot be blank.', status_code=400)
+    return cleaned
+
+
+def _clean_language_code(value: str) -> str:
+    cleaned = _clean_required(value, 'language_code').lower()
+    if len(cleaned) > 8:
+        raise AppError(code='invalid_request', message='language_code is too long.', status_code=400)
     return cleaned
 
 
@@ -90,15 +103,21 @@ def list_intents(db: Session = Depends(get_db)) -> dict[str, list[dict[str, str 
 def create_intent(payload: IntentWriteRequest, db: Session = Depends(get_db)) -> dict[str, str]:
     repo = IntentRepository(db)
     embedding_repo = EmbeddingRepository(db)
+    utterance_repo = UtteranceRepository(db)
     now = datetime.now(timezone.utc).isoformat()
     intent_code = _clean_required(payload.intent_code, 'intent_code')
     description = _clean_required(payload.description, 'description')
     try:
         intent = repo.create(intent_code=intent_code, description=description)
-        text = f'{intent.intent_code}\n{intent.description}'
-        embedding = pipeline.embedding_provider.embed(text).vector
-        embedding_repo.upsert_for_intent(
+        utterance = utterance_repo.create(
             intent_id=intent.id,
+            language_code='tr',
+            text=description,
+            source='intent_description',
+        )
+        embedding = pipeline.embedding_provider.embed(utterance.text).vector
+        embedding_repo.upsert_for_utterance(
+            utterance_id=utterance.id,
             model_name=settings.embedding_model_name,
             embedding=embedding,
         )
@@ -117,6 +136,7 @@ def create_intent(payload: IntentWriteRequest, db: Session = Depends(get_db)) ->
 def update_intent(intent_id: UUID, payload: IntentWriteRequest, db: Session = Depends(get_db)) -> dict[str, str]:
     repo = IntentRepository(db)
     embedding_repo = EmbeddingRepository(db)
+    utterance_repo = UtteranceRepository(db)
     intent = repo.get_by_id(intent_id)
     if intent is None:
         raise AppError(code='intent_not_found', message='Intent not found.', status_code=404)
@@ -124,10 +144,25 @@ def update_intent(intent_id: UUID, payload: IntentWriteRequest, db: Session = De
     description = _clean_required(payload.description, 'description')
     try:
         updated = repo.update(intent, intent_code=intent_code, description=description)
-        text = f'{updated.intent_code}\n{updated.description}'
-        embedding = pipeline.embedding_provider.embed(text).vector
-        embedding_repo.upsert_for_intent(
-            intent_id=updated.id,
+        existing_utterances = utterance_repo.by_intent_id(updated.id)
+        canonical_utterance = next((item for item in existing_utterances if item.source == 'intent_description'), None)
+        if canonical_utterance is None:
+            canonical_utterance = utterance_repo.create(
+                intent_id=updated.id,
+                language_code='tr',
+                text=description,
+                source='intent_description',
+            )
+        else:
+            utterance_repo.update(
+                canonical_utterance,
+                language_code='tr',
+                text=description,
+                source='intent_description',
+            )
+        embedding = pipeline.embedding_provider.embed(canonical_utterance.text).vector
+        embedding_repo.upsert_for_utterance(
+            utterance_id=canonical_utterance.id,
             model_name=settings.embedding_model_name,
             embedding=embedding,
         )
@@ -157,13 +192,21 @@ def delete_intent(intent_id: UUID, db: Session = Depends(get_db)) -> dict[str, s
 def reindex_intents(db: Session = Depends(get_db)) -> dict[str, str | int]:
     repo = IntentRepository(db)
     embedding_repo = EmbeddingRepository(db)
+    utterance_repo = UtteranceRepository(db)
     intents = repo.list_active()
+    reindexed_count = 0
     for intent in intents:
-        text = f'{intent.intent_code}\n{intent.description}'
-        embedding = pipeline.embedding_provider.embed(text).vector
-        embedding_repo.upsert_for_intent(intent_id=intent.id, model_name=settings.embedding_model_name, embedding=embedding)
+        utterances = utterance_repo.by_intent_id(intent.id)
+        for utterance in utterances:
+            embedding = pipeline.embedding_provider.embed(utterance.text).vector
+            embedding_repo.upsert_for_utterance(
+                utterance_id=utterance.id,
+                model_name=settings.embedding_model_name,
+                embedding=embedding,
+            )
+            reindexed_count += 1
     db.commit()
-    return {'status': 'ok', 'reindexed_count': len(intents)}
+    return {'status': 'ok', 'reindexed_count': reindexed_count}
 
 
 @router.post('/v1/intents/search')
@@ -181,6 +224,101 @@ def search_intents(payload: IntentSearchRequest, db: Session = Depends(get_db)) 
             for item in candidates
         ]
     }
+
+
+@router.get('/v1/intents/{intent_id}/utterances')
+def list_intent_utterances(intent_id: UUID, db: Session = Depends(get_db)) -> dict[str, list[dict[str, str]]]:
+    intent_repo = IntentRepository(db)
+    utterance_repo = UtteranceRepository(db)
+    intent = intent_repo.get_by_id(intent_id)
+    if intent is None:
+        raise AppError(code='intent_not_found', message='Intent not found.', status_code=404)
+    utterances = utterance_repo.by_intent_id(intent_id)
+    return {
+        'items': [
+            {
+                'id': str(item.id),
+                'intent_id': str(item.intent_id),
+                'language_code': item.language_code,
+                'text': item.text,
+                'source': item.source,
+            }
+            for item in utterances
+        ]
+    }
+
+
+@router.post('/v1/intents/{intent_id}/utterances')
+def create_intent_utterance(
+    intent_id: UUID,
+    payload: UtteranceWriteRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    intent_repo = IntentRepository(db)
+    utterance_repo = UtteranceRepository(db)
+    embedding_repo = EmbeddingRepository(db)
+    intent = intent_repo.get_by_id(intent_id)
+    if intent is None:
+        raise AppError(code='intent_not_found', message='Intent not found.', status_code=404)
+
+    text = _clean_required(payload.text, 'text')
+    language_code = _clean_language_code(payload.language_code)
+    source = _clean_required(payload.source, 'source')
+    utterance = utterance_repo.create(intent_id=intent.id, language_code=language_code, text=text, source=source)
+    embedding = pipeline.embedding_provider.embed(utterance.text).vector
+    embedding_repo.upsert_for_utterance(
+        utterance_id=utterance.id,
+        model_name=settings.embedding_model_name,
+        embedding=embedding,
+    )
+    db.commit()
+    return {'id': str(utterance.id), 'intent_id': str(intent.id)}
+
+
+@router.put('/v1/intents/{intent_id}/utterances/{utterance_id}')
+def update_intent_utterance(
+    intent_id: UUID,
+    utterance_id: UUID,
+    payload: UtteranceWriteRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    intent_repo = IntentRepository(db)
+    utterance_repo = UtteranceRepository(db)
+    embedding_repo = EmbeddingRepository(db)
+    intent = intent_repo.get_by_id(intent_id)
+    if intent is None:
+        raise AppError(code='intent_not_found', message='Intent not found.', status_code=404)
+    utterance = utterance_repo.get_by_id(utterance_id)
+    if utterance is None or str(utterance.intent_id) != str(intent.id):
+        raise AppError(code='utterance_not_found', message='Utterance not found.', status_code=404)
+
+    text = _clean_required(payload.text, 'text')
+    language_code = _clean_language_code(payload.language_code)
+    source = _clean_required(payload.source, 'source')
+    updated = utterance_repo.update(utterance, language_code=language_code, text=text, source=source)
+    embedding = pipeline.embedding_provider.embed(updated.text).vector
+    embedding_repo.upsert_for_utterance(
+        utterance_id=updated.id,
+        model_name=settings.embedding_model_name,
+        embedding=embedding,
+    )
+    db.commit()
+    return {'id': str(updated.id), 'intent_id': str(intent.id)}
+
+
+@router.delete('/v1/intents/{intent_id}/utterances/{utterance_id}')
+def delete_intent_utterance(intent_id: UUID, utterance_id: UUID, db: Session = Depends(get_db)) -> dict[str, str]:
+    intent_repo = IntentRepository(db)
+    utterance_repo = UtteranceRepository(db)
+    intent = intent_repo.get_by_id(intent_id)
+    if intent is None:
+        raise AppError(code='intent_not_found', message='Intent not found.', status_code=404)
+    utterance = utterance_repo.get_by_id(utterance_id)
+    if utterance is None or str(utterance.intent_id) != str(intent.id):
+        raise AppError(code='utterance_not_found', message='Utterance not found.', status_code=404)
+    utterance_repo.delete(utterance)
+    db.commit()
+    return {'status': 'deleted', 'id': str(utterance_id)}
 
 
 @router.post('/v1/inference/intent')

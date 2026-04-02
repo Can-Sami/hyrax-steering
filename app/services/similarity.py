@@ -1,9 +1,9 @@
 from collections.abc import Sequence
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
-from app.db.models import Intent, IntentEmbedding
+from app.db.models import Intent, IntentEmbedding, IntentUtterance
 from app.domain.schemas import IntentCandidate
 
 
@@ -16,15 +16,21 @@ class SimilaritySearchService:
             raise ValueError('k must be >= 1')
 
         _ = language_code
+        score_expr = (1 - IntentEmbedding.embedding.cosine_distance(embedding)).label('score')
         query: Select = (
             select(
                 Intent.id,
                 Intent.intent_code,
-                (1 - IntentEmbedding.embedding.cosine_distance(embedding)).label('score'),
+                func.max(score_expr).label('score'),
             )
-            .join(IntentEmbedding, IntentEmbedding.intent_id == Intent.id)
-            .where(Intent.is_active.is_(True))
-            .order_by(IntentEmbedding.embedding.cosine_distance(embedding))
+            .join(IntentUtterance, IntentUtterance.intent_id == Intent.id)
+            .join(IntentEmbedding, IntentEmbedding.utterance_id == IntentUtterance.id)
+            .where(
+                Intent.is_active.is_(True),
+                IntentUtterance.language_code == language_code,
+            )
+            .group_by(Intent.id, Intent.intent_code)
+            .order_by(func.max(score_expr).desc())
             .limit(k)
         )
 

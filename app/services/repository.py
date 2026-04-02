@@ -52,13 +52,13 @@ class EmbeddingRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def by_intent_id(self, intent_id: UUID | str) -> list[IntentEmbedding]:
-        return list(self.db.scalars(select(IntentEmbedding).where(IntentEmbedding.intent_id == intent_id)).all())
+    def by_utterance_id(self, utterance_id: UUID | str) -> list[IntentEmbedding]:
+        return list(self.db.scalars(select(IntentEmbedding).where(IntentEmbedding.utterance_id == utterance_id)).all())
 
-    def upsert_for_intent(self, intent_id: UUID | str, model_name: str, embedding: list[float]) -> IntentEmbedding:
+    def upsert_for_utterance(self, utterance_id: UUID | str, model_name: str, embedding: list[float]) -> IntentEmbedding:
         record = self.db.scalar(
             select(IntentEmbedding).where(
-                IntentEmbedding.intent_id == intent_id,
+                IntentEmbedding.utterance_id == utterance_id,
                 IntentEmbedding.model_name == model_name,
             )
         )
@@ -66,7 +66,7 @@ class EmbeddingRepository:
         norm = sum(item * item for item in embedding) ** 0.5
         if record is None:
             record = IntentEmbedding(
-                intent_id=intent_id,
+                utterance_id=utterance_id,
                 model_name=model_name,
                 embedding=embedding,
                 norm=norm,
@@ -86,5 +86,33 @@ class UtteranceRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def by_intent_id(self, intent_id: str) -> list[IntentUtterance]:
+    def by_intent_id(self, intent_id: UUID | str) -> list[IntentUtterance]:
         return list(self.db.scalars(select(IntentUtterance).where(IntentUtterance.intent_id == intent_id)).all())
+
+    def create(self, intent_id: UUID | str, language_code: str, text: str, source: str) -> IntentUtterance:
+        now = _utc_now()
+        utterance = IntentUtterance(
+            intent_id=intent_id,
+            language_code=language_code,
+            text=text,
+            source=source,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(utterance)
+        self.db.flush()
+        return utterance
+
+    def get_by_id(self, utterance_id: UUID | str) -> IntentUtterance | None:
+        return self.db.get(IntentUtterance, utterance_id)
+
+    def update(self, utterance: IntentUtterance, language_code: str, text: str, source: str) -> IntentUtterance:
+        utterance.language_code = language_code
+        utterance.text = text
+        utterance.source = source
+        utterance.updated_at = _utc_now()
+        self.db.flush()
+        return utterance
+
+    def delete(self, utterance: IntentUtterance) -> None:
+        self.db.delete(utterance)

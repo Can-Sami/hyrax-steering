@@ -24,4 +24,6 @@ def test_initial_migration_defines_pgvector_extension_and_core_tables() -> None:
     assert "op.create_table(\n        'intents'" in content
     assert "op.create_table(\n        'intent_embeddings'" in content
     assert "sa.Column('description', sa.Text(), nullable=False)" in content
+    assert "sa.Column('utterance_id', postgresql.UUID(as_uuid=True), nullable=False)" in content
+    assert "uq_intent_embeddings_utterance_model" in content
     assert "Vector(dim=1024)" in content

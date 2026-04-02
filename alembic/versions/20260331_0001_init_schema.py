@@ -50,15 +50,15 @@ def upgrade() -> None:
     op.create_table(
         'intent_embeddings',
         sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column('intent_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('utterance_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('model_name', sa.String(length=128), nullable=False),
         sa.Column('embedding', Vector(dim=1024), nullable=False),
         sa.Column('norm', sa.Float(), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.text('now()')),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.text('now()')),
-        sa.ForeignKeyConstraint(['intent_id'], ['intents.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['utterance_id'], ['intent_utterances.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('intent_id', 'model_name', name='uq_intent_embeddings_intent_model'),
+        sa.UniqueConstraint('utterance_id', 'model_name', name='uq_intent_embeddings_utterance_model'),
     )
 
     op.create_table(
@@ -106,7 +106,7 @@ def upgrade() -> None:
 
     op.create_index('ix_intent_utterances_intent_id', 'intent_utterances', ['intent_id'])
     op.create_index('ix_intent_utterances_language_code', 'intent_utterances', ['language_code'])
-    op.create_index('ix_intent_embeddings_intent_id', 'intent_embeddings', ['intent_id'])
+    op.create_index('ix_intent_embeddings_utterance_id', 'intent_embeddings', ['utterance_id'])
     op.create_index('ix_inference_requests_created_at', 'inference_requests', ['created_at'])
     op.create_index('ix_inference_requests_language_code', 'inference_requests', ['language_code'])
     op.create_index('ix_inference_results_request_id', 'inference_results', ['request_id'])
@@ -118,7 +118,7 @@ def downgrade() -> None:
     op.drop_index('ix_inference_results_request_id', table_name='inference_results')
     op.drop_index('ix_inference_requests_language_code', table_name='inference_requests')
     op.drop_index('ix_inference_requests_created_at', table_name='inference_requests')
-    op.drop_index('ix_intent_embeddings_intent_id', table_name='intent_embeddings')
+    op.drop_index('ix_intent_embeddings_utterance_id', table_name='intent_embeddings')
     op.drop_index('ix_intent_utterances_language_code', table_name='intent_utterances')
     op.drop_index('ix_intent_utterances_intent_id', table_name='intent_utterances')
 

@@ -61,7 +61,7 @@ curl -s http://localhost:18000/api/v1/intents
 ```
 
 ### `POST /api/v1/intents`
-Creates an intent and stores embedding.
+Creates an intent, adds canonical utterance from description, and stores embedding.
 
 ```bash
 curl -s -X POST http://localhost:18000/api/v1/intents \
@@ -78,7 +78,7 @@ curl -s -X POST http://localhost:18000/api/v1/intents \
 ```
 
 ### `PUT /api/v1/intents/{intent_id}`
-Updates an intent and refreshes embedding.
+Updates an intent and refreshes canonical utterance embedding.
 
 ```bash
 curl -s -X PUT http://localhost:18000/api/v1/intents/<intent_id> \
@@ -108,7 +108,7 @@ curl -s -X DELETE http://localhost:18000/api/v1/intents/<intent_id>
 ```
 
 ### `POST /api/v1/intents/reindex`
-Rebuilds embeddings for all active intents.
+Rebuilds embeddings for all utterances of active intents.
 
 ```bash
 curl -s -X POST http://localhost:18000/api/v1/intents/reindex
@@ -117,12 +117,65 @@ curl -s -X POST http://localhost:18000/api/v1/intents/reindex
 ```json
 {
   "status": "ok",
-  "reindexed_count": 12
+  "reindexed_count": 34
 }
 ```
 
+### `GET /api/v1/intents/{intent_id}/utterances`
+Lists utterances for an intent cluster.
+
+```bash
+curl -s http://localhost:18000/api/v1/intents/<intent_id>/utterances
+```
+
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "intent_id": "uuid",
+      "language_code": "tr",
+      "text": "Kart borcumu ogrenmek istiyorum",
+      "source": "manual"
+    }
+  ]
+}
+```
+
+### `POST /api/v1/intents/{intent_id}/utterances`
+Adds a new utterance to an intent cluster and stores embedding.
+
+```bash
+curl -s -X POST http://localhost:18000/api/v1/intents/<intent_id>/utterances \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Kart borcumu ogrenmek istiyorum","language_code":"tr","source":"manual"}'
+```
+
+```json
+{
+  "id": "uuid",
+  "intent_id": "uuid"
+}
+```
+
+### `PUT /api/v1/intents/{intent_id}/utterances/{utterance_id}`
+Updates utterance text/metadata and refreshes embedding.
+
+```bash
+curl -s -X PUT http://localhost:18000/api/v1/intents/<intent_id>/utterances/<utterance_id> \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Kart borcum ne kadar?","language_code":"tr","source":"manual"}'
+```
+
+### `DELETE /api/v1/intents/{intent_id}/utterances/{utterance_id}`
+Deletes an utterance from an intent cluster.
+
+```bash
+curl -s -X DELETE http://localhost:18000/api/v1/intents/<intent_id>/utterances/<utterance_id>
+```
+
 ### `POST /api/v1/intents/search`
-Semantic search by query text.
+Semantic search by query text across utterance embeddings; results are aggregated by intent with max similarity.
 
 ```bash
 curl -s -X POST http://localhost:18000/api/v1/intents/search \
