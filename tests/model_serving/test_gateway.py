@@ -303,3 +303,124 @@ def test_transcriptions_oversized_audio_rejected(monkeypatch) -> None:
 
     assert response.status_code == 413
     assert response.json()['detail'] == 'Uploaded audio exceeds size limit.'
+
+
+def test_score_auth_required(monkeypatch) -> None:
+    module = load_gateway_app(monkeypatch)
+    client = TestClient(module.app)
+
+    response = client.post('/v1/score', json={'text_1': 'q', 'text_2': ['d']})
+
+    assert response.status_code == 401
+
+
+def test_score_requires_text_fields(monkeypatch) -> None:
+    module = load_gateway_app(monkeypatch)
+    client = TestClient(module.app)
+
+    response = client.post('/v1/score', json={}, headers={'Authorization': f'Bearer {module.GATEWAY_API_KEY}'})
+
+    assert response.status_code == 400
+    assert response.json()['error']['code'] == 'missing_required_field'
+
+
+def test_score_proxies_to_vllm_score_endpoint(monkeypatch) -> None:
+    monkeypatch.setenv('EMBEDDING_BACKEND_MODE', 'vllm')
+    module = load_gateway_app(monkeypatch)
+    captured = {}
+
+    class CapturingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *args, **kwargs):
+            captured['url'] = url
+            captured['json'] = kwargs.get('json')
+            request = httpx.Request('POST', url)
+            return httpx.Response(
+                status_code=200,
+                request=request,
+                json={'data': [{'index': 0, 'score': 0.88}]},
+            )
+
+    monkeypatch.setattr(module.httpx, 'AsyncClient', lambda *args, **kwargs: CapturingClient())
+    client = TestClient(module.app)
+
+    response = client.post(
+        '/v1/score',
+        json={'text_1': 'fatura ode', 'text_2': ['fatura odeme islemleri']},
+        headers={'Authorization': f'Bearer {module.GATEWAY_API_KEY}'},
+    )
+
+    assert response.status_code == 200
+    assert captured['url'].endswith('/v1/score')
+    assert captured['json']['text_1'] == 'fatura ode'
+    assert captured['json']['text_2'] == ['fatura odeme islemleri']
+    assert captured['json']['model'] == 'BAAI/bge-reranker-v2-m3'
+
+
+def test_score_proxies_to_cpu_endpoint_in_cpu_mode(monkeypatch) -> None:
+    monkeypatch.setenv('EMBEDDING_BACKEND_MODE', 'transformers_cpu')
+    module = load_gateway_app(monkeypatch)
+    captured = {}
+
+    class CapturingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *args, **kwargs):
+            captured['url'] = url
+            request = httpx.Request('POST', url)
+            return httpx.Response(
+                status_code=200,
+                request=request,
+                json={'data': [{'index': 0, 'score': 0.55}]},
+            )
+
+    monkeypatch.setattr(module.httpx, 'AsyncClient', lambda *args, **kwargs: CapturingClient())
+    client = TestClient(module.app)
+
+    response = client.post(
+        '/v1/score',
+        json={'text_1': 'fatura ode', 'text_2': ['fatura odeme islemleri']},
+        headers={'Authorization': f'Bearer {module.GATEWAY_API_KEY}'},
+    )
+
+    assert response.status_code == 200
+    assert 'embeddings-cpu' in captured['url']
+
+
+def test_score_rejects_too_many_documents(monkeypatch) -> None:
+    monkeypatch.setenv('MAX_SCORE_DOCS', '2')
+    module = load_gateway_app(monkeypatch)
+    client = TestClient(module.app)
+
+    response = client.post(
+        '/v1/score',
+        json={'text_1': 'q', 'text_2': ['d1', 'd2', 'd3']},
+        headers={'Authorization': f'Bearer {module.GATEWAY_API_KEY}'},
+    )
+
+    assert response.status_code == 400
+    assert response.json()['error']['code'] == 'invalid_input'
+
+
+def test_score_rejects_too_large_total_chars(monkeypatch) -> None:
+    monkeypatch.setenv('MAX_SCORE_TOTAL_CHARS', '10')
+    module = load_gateway_app(monkeypatch)
+    client = TestClient(module.app)
+
+    response = client.post(
+        '/v1/score',
+        json={'text_1': '123456', 'text_2': ['12345']},
+        headers={'Authorization': f'Bearer {module.GATEWAY_API_KEY}'},
+    )
+
+    assert response.status_code == 400
+    assert response.json()['error']['code'] == 'invalid_input'

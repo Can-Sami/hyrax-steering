@@ -91,6 +91,9 @@ services:
       - EMBEDDING_ENGINE=${EMBEDDING_ENGINE:-openai_compatible}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-http://model-gateway:8000/v1}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-local-dev-key}
+      - RERANKER_BASE_URL=${RERANKER_BASE_URL:-}
+      - RERANKER_API_KEY=${RERANKER_API_KEY:-}
+      - RERANKER_MODEL_NAME=${RERANKER_MODEL_NAME:-BAAI/bge-reranker-v2-m3}
       - WHISPER_MODEL_NAME=${WHISPER_MODEL_NAME:-openai/whisper-large-v3}
       - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-8B}
       - API_KEY=${API_KEY:-}

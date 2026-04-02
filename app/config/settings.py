@@ -17,10 +17,14 @@ class Settings(BaseSettings):
     model_precision: str = Field(default='fp32')
     stt_engine: str = Field(default='stub')
     embedding_engine: str = Field(default='stub')
+    reranker_engine: str = Field(default='openai_compatible')
     openai_base_url: str = Field(default='http://127.0.0.1:8001/v1')
     openai_api_key: str = Field(default='local-dev-key')
     whisper_model_name: str = Field(default='whisper-large-v3')
     embedding_model_name: str = Field(default='Qwen/Qwen3-Embedding-8B')
+    reranker_base_url: str = Field(default='')
+    reranker_api_key: str = Field(default='')
+    reranker_model_name: str = Field(default='BAAI/bge-reranker-v2-m3')
     api_key: str = Field(default='')
 
 

@@ -10,6 +10,14 @@ class IntentCandidate:
 
 
 @dataclass(frozen=True)
+class RerankedIntentCandidate:
+    intent_id: UUID
+    intent_code: str
+    semantic_score: float
+    reranker_score: float
+
+
+@dataclass(frozen=True)
 class ConfidenceResult:
     top_candidate: IntentCandidate | None
     top_k: tuple[IntentCandidate, ...]

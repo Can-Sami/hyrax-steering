@@ -3,8 +3,8 @@
 This project runs a separate model service for backend intent recognition.
 
 - `embedding-vllm`: serves embeddings via vLLM (GPU-accelerated)
-- `embeddings-cpu`: serves embeddings via Transformers on CPU
-- `model-gateway`: serves `/v1/audio/transcriptions` using faster-whisper and proxies embeddings based on backend mode
+- `embeddings-cpu`: serves embeddings via Transformers on CPU and exposes `/v1/score` (dot-product semantic rerank fallback)
+- `model-gateway`: serves `/v1/audio/transcriptions`, proxies `/v1/embeddings` based on backend mode, and proxies `/v1/score` to the active backend (`vllm` or `embeddings-cpu`)
 
 ## Backend modes
 

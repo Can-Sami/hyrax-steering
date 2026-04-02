@@ -6,7 +6,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.api import routes
-from app.domain.schemas import IntentCandidate
+from app.api.errors import AppError
+from app.domain.schemas import IntentCandidate, RerankedIntentCandidate
 from app.workers.pipeline import EmbeddingResult
 
 
@@ -128,11 +129,30 @@ def test_intent_crud_and_search(monkeypatch) -> None:
                 for idx, item in enumerate(intents)
             ]
 
+    class FakeTwoStageIntentSearchService:
+        def __init__(self, db, reranker_provider) -> None:
+            _ = (db, reranker_provider)
+
+        def top_k(self, query: str, embedding, k: int = 5, language_code: str = 'tr'):
+            _ = (query, embedding, k, language_code)
+            intents = list(store.values())[:k]
+            return [
+                RerankedIntentCandidate(
+                    intent_id=item.id,
+                    intent_code=item.intent_code,
+                    semantic_score=0.7 - idx * 0.1,
+                    reranker_score=0.9 - idx * 0.1,
+                )
+                for idx, item in enumerate(intents)
+            ]
+
     monkeypatch.setattr(routes.pipeline.embedding_provider, 'embed', lambda text: EmbeddingResult(vector=_fake_embed(text)))
     monkeypatch.setattr(routes, 'IntentRepository', FakeIntentRepository)
     monkeypatch.setattr(routes, 'EmbeddingRepository', FakeEmbeddingRepository)
     monkeypatch.setattr(routes, 'UtteranceRepository', FakeUtteranceRepository)
     monkeypatch.setattr(routes, 'SimilaritySearchService', FakeSimilaritySearchService)
+    monkeypatch.setattr(routes, 'TwoStageIntentSearchService', FakeTwoStageIntentSearchService)
+    monkeypatch.setattr(routes, 'build_reranker_provider', lambda settings: object())
     app.dependency_overrides[routes.get_db] = lambda: _FakeDb()
     client = TestClient(app)
 
@@ -176,6 +196,15 @@ def test_intent_crud_and_search(monkeypatch) -> None:
     assert 'items' in search_response.json()
     assert len(search_response.json()['items']) >= 1
 
+    rerank_search_response = client.post(
+        '/api/v1/intents/search/rerank',
+        json={'query': 'tarife degistirmek istiyorum', 'k': 3},
+    )
+    assert rerank_search_response.status_code == 200
+    rerank_items = rerank_search_response.json()['items']
+    assert len(rerank_items) >= 1
+    assert {'intent_code', 'semantic_score', 'reranker_score'} <= set(rerank_items[0].keys())
+
     delete_utterance = client.delete(f'/api/v1/intents/{intent_id}/utterances/{utterance_id}')
     assert delete_utterance.status_code == 200
     assert delete_utterance.json()['status'] == 'deleted'
@@ -184,3 +213,30 @@ def test_intent_crud_and_search(monkeypatch) -> None:
     assert delete_response.status_code == 200
     assert delete_response.json()['status'] == 'deleted'
     app.dependency_overrides.clear()
+
+
+def test_rerank_search_propagates_reranker_error(monkeypatch) -> None:
+    class _FakeDb:
+        pass
+
+    class _FakeTwoStageIntentSearchService:
+        def __init__(self, db, reranker_provider) -> None:
+            _ = (db, reranker_provider)
+
+        def top_k(self, query: str, embedding, k: int = 5, language_code: str = 'tr'):
+            _ = (query, embedding, k, language_code)
+            raise AppError(code='reranker_engine_error', message='Reranker unavailable.', status_code=502)
+
+    monkeypatch.setattr(routes.pipeline.embedding_provider, 'embed', lambda text: EmbeddingResult(vector=_fake_embed(text)))
+    monkeypatch.setattr(routes, 'TwoStageIntentSearchService', _FakeTwoStageIntentSearchService)
+    monkeypatch.setattr(routes, 'build_reranker_provider', lambda settings: object())
+    app.dependency_overrides[routes.get_db] = lambda: _FakeDb()
+    client = TestClient(app)
+
+    try:
+        response = client.post('/api/v1/intents/search/rerank', json={'query': 'faturami ode', 'k': 3})
+        assert response.status_code == 502
+        body = response.json()
+        assert body['error']['code'] == 'reranker_engine_error'
+    finally:
+        app.dependency_overrides.clear()

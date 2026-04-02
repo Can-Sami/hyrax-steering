@@ -192,6 +192,35 @@ curl -s -X POST http://localhost:18000/api/v1/intents/search \
 }
 ```
 
+### `POST /api/v1/intents/search/rerank`
+Two-stage search: semantic top-K retrieval followed by cross-encoder reranking (`BAAI/bge-reranker-v2-m3`) via configured vLLM scoring API.
+
+```bash
+curl -s -X POST http://localhost:18000/api/v1/intents/search/rerank \
+  -H "Content-Type: application/json" \
+  -d '{"query":"faturami odemek istiyorum","k":5,"language_hint":"tr"}'
+```
+
+```json
+{
+  "items": [
+    { "intent_code": "bill_payment", "semantic_score": 0.86, "reranker_score": 0.42 },
+    { "intent_code": "bill_check", "semantic_score": 0.88, "reranker_score": 0.15 }
+  ]
+}
+```
+
+If reranker upstream fails, this endpoint returns:
+
+```json
+{
+  "error": {
+    "code": "reranker_engine_error",
+    "message": "Failed to rerank candidates from configured engine."
+  }
+}
+```
+
 ## Inference
 
 ### `POST /api/v1/inference/intent` (multipart/form-data)

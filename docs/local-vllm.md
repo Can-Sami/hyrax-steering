@@ -31,6 +31,9 @@ export STT_ENGINE=openai_compatible
 export EMBEDDING_ENGINE=openai_compatible
 export OPENAI_BASE_URL=http://127.0.0.1:8002/v1
 export OPENAI_API_KEY=local-dev-key
+export RERANKER_BASE_URL=   # optional; defaults to OPENAI_BASE_URL when empty
+export RERANKER_API_KEY=    # optional; defaults to OPENAI_API_KEY when empty
+export RERANKER_MODEL_NAME=BAAI/bge-reranker-v2-m3
 export WHISPER_MODEL_NAME=openai/whisper-large-v3
 ```
 

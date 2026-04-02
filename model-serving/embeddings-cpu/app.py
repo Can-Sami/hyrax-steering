@@ -6,6 +6,7 @@ import shutil
 from typing import Literal
 
 from huggingface_hub import hf_hub_download
+import numpy as np
 from fastapi import FastAPI, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -19,6 +20,10 @@ model_name = os.getenv("EMBEDDING_CPU_MODEL_NAME", "jinaai/jina-embeddings-v3")
 api_key = os.getenv("EMBEDDING_API_KEY", "local-dev-key")
 max_batch_size = int(os.getenv("EMBEDDING_MAX_BATCH_SIZE", "128"))
 max_input_chars = int(os.getenv("EMBEDDING_MAX_INPUT_CHARS", "8192"))
+max_score_docs = int(os.getenv("EMBEDDING_MAX_SCORE_DOCS", "64"))
+max_score_query_chars = int(os.getenv("EMBEDDING_MAX_SCORE_QUERY_CHARS", "4096"))
+max_score_doc_chars = int(os.getenv("EMBEDDING_MAX_SCORE_DOC_CHARS", "4096"))
+max_score_total_chars = int(os.getenv("EMBEDDING_MAX_SCORE_TOTAL_CHARS", "32768"))
 
 
 def _repair_jina_flash_module_cache(error_message: str) -> bool:
@@ -104,6 +109,26 @@ class ModelsResponse(BaseModel):
     data: list[ModelInfo]
 
 
+class ScoreRequest(BaseModel):
+    model: str | None = None
+    text_1: str
+    text_2: list[str]
+
+
+class ScoreData(BaseModel):
+    index: int
+    score: float
+
+
+class ScoreResponse(BaseModel):
+    object: str = "list"
+    data: list[ScoreData]
+    model: str
+
+
+ScoreResponse.model_rebuild()
+
+
 def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security)):
     if not secrets.compare_digest(credentials.credentials, api_key):
         raise HTTPException(
@@ -180,3 +205,66 @@ def create_embeddings(
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+
+@app.post("/v1/score", response_model=ScoreResponse)
+def create_scores(
+    request: ScoreRequest,
+    credentials: HTTPAuthorizationCredentials = Security(security)
+):
+    verify_api_key(credentials)
+
+    if not request.text_1.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="text_1 must be a non-empty string"
+        )
+    if not request.text_2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="text_2 must be a non-empty list of strings"
+        )
+    if len(request.text_2) > max_score_docs:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"text_2 exceeds maximum document count of {max_score_docs}"
+        )
+    if any((not item.strip()) for item in request.text_2):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="text_2 must contain non-empty strings only"
+        )
+    if len(request.text_1) > max_score_query_chars:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"text_1 exceeds maximum length of {max_score_query_chars} characters"
+        )
+    if any(len(item) > max_score_doc_chars for item in request.text_2):
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"text_2 contains documents exceeding max length of {max_score_doc_chars} characters"
+        )
+    total_chars = len(request.text_1) + sum(len(item) for item in request.text_2)
+    if total_chars > max_score_total_chars:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"score request exceeds total character limit of {max_score_total_chars}"
+        )
+
+    model_instance = load_model()
+    query_embedding = model_instance.encode(
+        [request.text_1],
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )[0]
+    docs_embedding = model_instance.encode(
+        request.text_2,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )
+    scores = np.dot(docs_embedding, query_embedding).tolist()
+
+    return ScoreResponse(
+        data=[ScoreData(index=index, score=float(score)) for index, score in enumerate(scores)],
+        model=request.model or model_name,
+    )

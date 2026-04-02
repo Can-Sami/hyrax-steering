@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, Select
 from sqlalchemy.orm import Session
 
 from app.db.models import InferenceRequest, InferenceResult, Intent, IntentEmbedding, IntentUtterance
@@ -46,6 +46,13 @@ class IntentRepository:
 
     def delete(self, intent: Intent) -> None:
         self.db.delete(intent)
+
+    def get_descriptions_by_ids(self, intent_ids: list[UUID | str]) -> dict[UUID, str]:
+        if not intent_ids:
+            return {}
+        query: Select = select(Intent.id, Intent.description).where(Intent.id.in_(intent_ids))
+        rows = self.db.execute(query).all()
+        return {row.id: row.description for row in rows}
 
 
 class EmbeddingRepository:
