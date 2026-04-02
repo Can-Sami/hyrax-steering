@@ -89,9 +89,13 @@ class InferenceResult(Base):
         nullable=True,
     )
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    top_k_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    top_k_json: Mapped[dict | list] = mapped_column(JSONB, nullable=False)
     policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('request_id', name='uq_inference_results_request_id'),
+    )
 
 
 class ModelRegistry(Base):

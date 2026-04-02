@@ -27,3 +27,9 @@ def test_initial_migration_defines_pgvector_extension_and_core_tables() -> None:
     assert "sa.Column('utterance_id', postgresql.UUID(as_uuid=True), nullable=False)" in content
     assert "uq_intent_embeddings_utterance_model" in content
     assert "Vector(dim=1024)" in content
+
+
+def test_latest_migration_adds_unique_constraint_for_inference_result_request() -> None:
+    migration_file = Path('alembic/versions/20260402_0003_add_unique_inference_result_request.py')
+    content = migration_file.read_text(encoding='utf-8')
+    assert "op.create_unique_constraint(\n        'uq_inference_results_request_id'" in content

@@ -195,7 +195,7 @@ curl -s -X POST http://localhost:18000/api/v1/intents/search \
 ## Inference
 
 ### `POST /api/v1/inference/intent` (multipart/form-data)
-Infers intent from uploaded audio file.
+Infers intent from uploaded audio file and persists request/result records server-side for analytics aggregation.
 
 Auth: if `API_KEY` is configured, send header `x-api-key: <key>`.
 
@@ -221,6 +221,80 @@ curl -s -X POST http://localhost:18000/api/v1/inference/intent \
     { "intent_code": "card_limit", "score": 0.67 }
   ],
   "processing_ms": 120
+}
+```
+
+## Overview Dashboard
+
+Overview metrics are aggregated server-side from persisted inference data (`inference_requests` + `inference_results`) and filtered by explicit timeframe.
+
+### Time filter parameters
+
+- `start_at` (required): ISO timestamp (for example `2026-04-01T10:00:00Z`)
+- `end_at` (required): ISO timestamp
+- Rule: `start_at < end_at`
+
+### `GET /api/v1/overview/summary`
+Returns total inferences, average confidence, and previous-window delta percentages.
+
+```bash
+curl -s "http://localhost:18000/api/v1/overview/summary?start_at=2026-04-01T10:00:00Z&end_at=2026-04-01T12:00:00Z"
+```
+
+```json
+{
+  "total_inferences": 128,
+  "avg_confidence": 0.78,
+  "total_inferences_delta_pct": 14.29,
+  "avg_confidence_delta_pct": -2.5
+}
+```
+
+### `GET /api/v1/overview/intent-distribution`
+Returns intent distribution for the window, including unmatched inferences.
+
+```bash
+curl -s "http://localhost:18000/api/v1/overview/intent-distribution?start_at=2026-04-01T10:00:00Z&end_at=2026-04-01T12:00:00Z"
+```
+
+```json
+{
+  "items": [
+    { "intent_code": "balance_inquiry", "count": 74, "percentage": 57.81 },
+    { "intent_code": "card_limit", "count": 30, "percentage": 23.44 },
+    { "intent_code": "unmatched", "count": 24, "percentage": 18.75 }
+  ]
+}
+```
+
+### `GET /api/v1/overview/recent-activity`
+Returns most recent inference records first.
+
+Query params:
+- `start_at` (required)
+- `end_at` (required)
+- `limit` (optional, default `10`, min `1`, max `50`)
+
+```bash
+curl -s "http://localhost:18000/api/v1/overview/recent-activity?start_at=2026-04-01T10:00:00Z&end_at=2026-04-01T12:00:00Z&limit=2"
+```
+
+```json
+{
+  "items": [
+    {
+      "timestamp": "2026-04-01T11:59:10+00:00",
+      "input_snippet": "hesabimda ne kadar para var",
+      "predicted_intent": "balance_inquiry",
+      "confidence": 0.89
+    },
+    {
+      "timestamp": "2026-04-01T11:58:31+00:00",
+      "input_snippet": "temsilciye bagla",
+      "predicted_intent": null,
+      "confidence": 0.42
+    }
+  ]
 }
 ```
 

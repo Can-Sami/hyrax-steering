@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.db.models import Intent, IntentEmbedding, IntentUtterance
+from app.db.models import InferenceRequest, InferenceResult, Intent, IntentEmbedding, IntentUtterance
 
 
 def _utc_now() -> datetime:
@@ -116,3 +116,155 @@ class UtteranceRepository:
 
     def delete(self, utterance: IntentUtterance) -> None:
         self.db.delete(utterance)
+
+
+class InferenceRepository:
+    POLICY_VERSION = 'v1'
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def get_intent_by_code(self, intent_code: str) -> Intent | None:
+        return self.db.scalar(select(Intent).where(Intent.intent_code == intent_code))
+
+    def create_request(
+        self,
+        *,
+        external_request_id: str | None,
+        language_code: str,
+        audio_uri: str,
+        transcript: str | None,
+        status: str,
+        processing_ms: int | None,
+    ) -> InferenceRequest:
+        now = _utc_now()
+        inference_request = InferenceRequest(
+            external_request_id=external_request_id,
+            language_code=language_code,
+            audio_uri=audio_uri,
+            transcript=transcript,
+            status=status,
+            processing_ms=processing_ms,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(inference_request)
+        self.db.flush()
+        return inference_request
+
+    def create_result(
+        self,
+        *,
+        request_id,
+        predicted_intent_id,
+        confidence: float,
+        top_k_json: list[dict[str, str | float]],
+    ) -> InferenceResult:
+        result = InferenceResult(
+            request_id=request_id,
+            predicted_intent_id=predicted_intent_id,
+            confidence=confidence,
+            top_k_json=top_k_json,
+            policy_version=self.POLICY_VERSION,
+            created_at=_utc_now(),
+        )
+        self.db.add(result)
+        self.db.flush()
+        return result
+
+    def _window_metrics(self, start_at: datetime, end_at: datetime) -> tuple[int, float]:
+        total_inferences = self.db.scalar(
+            select(func.count(InferenceRequest.id)).where(
+                InferenceRequest.created_at >= start_at,
+                InferenceRequest.created_at < end_at,
+            )
+        )
+        avg_confidence = self.db.scalar(
+            select(func.avg(InferenceResult.confidence))
+            .join(InferenceRequest, InferenceResult.request_id == InferenceRequest.id)
+            .where(
+                InferenceRequest.created_at >= start_at,
+                InferenceRequest.created_at < end_at,
+            )
+        )
+        return int(total_inferences or 0), float(avg_confidence or 0.0)
+
+    @staticmethod
+    def _delta_pct(current: float, previous: float) -> float | None:
+        if previous == 0:
+            return None
+        return ((current - previous) / previous) * 100.0
+
+    def summary(self, start_at: datetime, end_at: datetime) -> dict[str, int | float | None]:
+        total_inferences, avg_confidence = self._window_metrics(start_at, end_at)
+        duration = end_at - start_at
+        previous_start = start_at - duration
+        previous_total, previous_avg = self._window_metrics(previous_start, start_at)
+
+        return {
+            'total_inferences': total_inferences,
+            'avg_confidence': avg_confidence,
+            'total_inferences_delta_pct': self._delta_pct(float(total_inferences), float(previous_total)),
+            'avg_confidence_delta_pct': self._delta_pct(avg_confidence, previous_avg),
+        }
+
+    def intent_distribution(self, start_at: datetime, end_at: datetime) -> list[dict[str, int | float | str]]:
+        total_inferences, _ = self._window_metrics(start_at, end_at)
+        label = func.coalesce(Intent.intent_code, 'unmatched')
+        rows = self.db.execute(
+            select(
+                label.label('intent_code'),
+                func.count(InferenceRequest.id).label('count'),
+            )
+            .select_from(InferenceRequest)
+            .outerjoin(InferenceResult, InferenceResult.request_id == InferenceRequest.id)
+            .outerjoin(Intent, InferenceResult.predicted_intent_id == Intent.id)
+            .where(
+                InferenceRequest.created_at >= start_at,
+                InferenceRequest.created_at < end_at,
+            )
+            .group_by(label)
+            .order_by(func.count(InferenceRequest.id).desc(), label.asc())
+        ).all()
+
+        items: list[dict[str, int | float | str]] = []
+        for row in rows:
+            count = int(row.count or 0)
+            percentage = (count / total_inferences * 100.0) if total_inferences else 0.0
+            items.append(
+                {
+                    'intent_code': row.intent_code,
+                    'count': count,
+                    'percentage': percentage,
+                }
+            )
+        return items
+
+    def recent_activity(self, start_at: datetime, end_at: datetime, limit: int) -> list[dict[str, object]]:
+        rows = self.db.execute(
+            select(
+                InferenceRequest.created_at.label('timestamp'),
+                InferenceRequest.transcript.label('input_snippet'),
+                Intent.intent_code.label('predicted_intent'),
+                InferenceResult.confidence.label('confidence'),
+            )
+            .select_from(InferenceRequest)
+            .outerjoin(InferenceResult, InferenceResult.request_id == InferenceRequest.id)
+            .outerjoin(Intent, InferenceResult.predicted_intent_id == Intent.id)
+            .where(
+                InferenceRequest.created_at >= start_at,
+                InferenceRequest.created_at < end_at,
+            )
+            .order_by(InferenceRequest.created_at.desc())
+            .limit(limit)
+        ).all()
+
+        return [
+            {
+                'timestamp': row.timestamp.isoformat(),
+                'input_snippet': row.input_snippet,
+                'predicted_intent': row.predicted_intent,
+                'confidence': row.confidence,
+            }
+            for row in rows
+        ]
