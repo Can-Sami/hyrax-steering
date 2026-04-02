@@ -27,6 +27,11 @@ class EmbeddingProvider:
         raise NotImplementedError
 
 
+class RerankerProvider:
+    def score_pairs(self, query: str, documents: list[str]) -> list[float]:
+        raise NotImplementedError
+
+
 class WhisperLargeV3Provider(SttProvider):
     def transcribe(self, audio_uri: str, language_code: str) -> TranscriptionResult:
         _ = (audio_uri, language_code)
@@ -108,6 +113,57 @@ class OpenAICompatibleTranscriptionProvider(SttProvider):
         return TranscriptionResult(transcript=str(transcript))
 
 
+class OpenAICompatibleRerankerProvider(RerankerProvider):
+    def __init__(self, base_url: str, api_key: str, model_name: str) -> None:
+        self.base_url = base_url.rstrip('/')
+        self.api_key = api_key
+        self.model_name = model_name
+
+    def score_pairs(self, query: str, documents: list[str]) -> list[float]:
+        payload = {
+            'model': self.model_name,
+            'text_1': query,
+            'text_2': documents,
+        }
+        headers = {'Authorization': f'Bearer {self.api_key}'}
+        try:
+            response = httpx.post(
+                f'{self.base_url}/score',
+                json=payload,
+                headers=headers,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            body = response.json()
+            data = body['data']
+            indices = [int(item['index']) for item in data]
+            expected_indices = set(range(len(documents)))
+            if len(indices) != len(set(indices)) or set(indices) != expected_indices:
+                raise AppError(
+                    code='reranker_engine_error',
+                    message='Reranker returned invalid candidate indices.',
+                    status_code=502,
+                )
+            pairs = sorted(
+                ((int(item['index']), float(item['score'])) for item in data),
+                key=lambda pair: pair[0],
+            )
+            scores = [score for _, score in pairs]
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, IndexError) as exc:
+            raise AppError(
+                code='reranker_engine_error',
+                message='Failed to rerank candidates from configured engine.',
+                status_code=502,
+            ) from exc
+        if len(scores) != len(documents):
+            raise AppError(
+                code='reranker_engine_error',
+                message='Reranker returned an invalid score count.',
+                status_code=502,
+            )
+        return scores
+
+
 def build_stt_provider(settings: Settings) -> SttProvider:
     if settings.stt_engine == 'openai_compatible':
         return OpenAICompatibleTranscriptionProvider(settings)
@@ -118,6 +174,22 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
     if settings.embedding_engine == 'openai_compatible':
         return OpenAICompatibleEmbeddingProvider(settings)
     return QwenEmbeddingProvider()
+
+
+def build_reranker_provider(settings: Settings) -> RerankerProvider:
+    if settings.reranker_engine != 'openai_compatible':
+        raise AppError(
+            code='reranker_engine_not_supported',
+            message='Configured reranker engine is not supported.',
+            status_code=500,
+        )
+    base_url = settings.reranker_base_url.strip() or settings.openai_base_url
+    api_key = settings.reranker_api_key.strip() or settings.openai_api_key
+    return OpenAICompatibleRerankerProvider(
+        base_url=base_url,
+        api_key=api_key,
+        model_name=settings.reranker_model_name,
+    )
 
 
 class InferencePipeline:

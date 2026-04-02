@@ -30,6 +30,10 @@ WHISPER_DEVICE = os.getenv('WHISPER_DEVICE', 'cpu')
 WHISPER_COMPUTE_TYPE = os.getenv('WHISPER_COMPUTE_TYPE', 'int8')
 MAX_UPLOAD_BYTES = int(os.getenv('MAX_UPLOAD_BYTES', str(25 * 1024 * 1024)))
 UPLOAD_CHUNK_SIZE = int(os.getenv('UPLOAD_CHUNK_SIZE', str(1024 * 1024)))
+MAX_SCORE_QUERY_CHARS = int(os.getenv('MAX_SCORE_QUERY_CHARS', '4096'))
+MAX_SCORE_DOCS = int(os.getenv('MAX_SCORE_DOCS', '64'))
+MAX_SCORE_DOC_CHARS = int(os.getenv('MAX_SCORE_DOC_CHARS', '4096'))
+MAX_SCORE_TOTAL_CHARS = int(os.getenv('MAX_SCORE_TOTAL_CHARS', '32768'))
 
 WHISPER_MODEL_ALIASES: dict[str, str] = {
     'openai/whisper-large-v3': 'large-v3',
@@ -67,6 +71,14 @@ def get_backend_model_name(backend_name: str) -> str:
     if backend_name == 'transformers_cpu':
         return os.getenv('EMBEDDING_CPU_MODEL_NAME', 'jinaai/jina-embeddings-v3')
     return DEFAULT_EMBEDDING_MODEL
+
+
+def get_vllm_base_url() -> str:
+    return os.getenv('EMBEDDING_VLLM_BASE_URL', 'http://embedding-vllm:8000/v1').rstrip('/')
+
+
+def get_cpu_base_url() -> str:
+    return os.getenv('EMBEDDING_CPU_BASE_URL', 'http://embeddings-cpu:8000/v1').rstrip('/')
 
 
 def check_auth(authorization: str | None) -> None:
@@ -227,3 +239,55 @@ async def transcriptions(
     finally:
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
+
+
+@app.post('/v1/score')
+async def score(payload: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
+    check_auth(authorization)
+    allowed_fields = {'model', 'text_1', 'text_2'}
+    unknown_fields = sorted(field for field in payload.keys() if field not in allowed_fields)
+    if unknown_fields:
+        return bad_request(
+            code='invalid_request',
+            message='Invalid request payload.',
+        )
+    if 'text_1' not in payload or 'text_2' not in payload:
+        return bad_request(
+            code='missing_required_field',
+            message='Request must include required fields: text_1, text_2.',
+        )
+    if not isinstance(payload['text_1'], str) or not payload['text_1'].strip():
+        return bad_request(code='invalid_input', message='text_1 must be a non-empty string.')
+    if not isinstance(payload['text_2'], list) or not payload['text_2']:
+        return bad_request(code='invalid_input', message='text_2 must be a non-empty list of strings.')
+    if len(payload['text_2']) > MAX_SCORE_DOCS:
+        return bad_request(code='invalid_input', message='text_2 exceeds max document count.')
+    if not all(isinstance(item, str) and item.strip() for item in payload['text_2']):
+        return bad_request(code='invalid_input', message='text_2 must contain non-empty strings only.')
+    if len(payload['text_1']) > MAX_SCORE_QUERY_CHARS:
+        return bad_request(code='invalid_input', message='text_1 exceeds max length.')
+    if any(len(item) > MAX_SCORE_DOC_CHARS for item in payload['text_2']):
+        return bad_request(code='invalid_input', message='text_2 contains documents exceeding max length.')
+    total_chars = len(payload['text_1']) + sum(len(item) for item in payload['text_2'])
+    if total_chars > MAX_SCORE_TOTAL_CHARS:
+        return bad_request(code='invalid_input', message='score request exceeds total character limit.')
+
+    request_body = {
+        'model': payload.get('model') or os.getenv('RERANKER_MODEL_NAME', 'BAAI/bge-reranker-v2-m3'),
+        'text_1': payload['text_1'],
+        'text_2': payload['text_2'],
+    }
+    headers = {'Authorization': f'Bearer {EMBEDDING_API_KEY}'}
+    backend_name, _ = get_embedding_backend_url()
+    score_base_url = get_vllm_base_url() if backend_name == 'vllm' else get_cpu_base_url()
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(f'{score_base_url}/score', json=request_body, headers=headers)
+            response.raise_for_status()
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        raise HTTPException(status_code=503, detail='Reranker upstream unavailable.') from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail='Reranker upstream failed.') from exc
+
+    return JSONResponse(response.json())

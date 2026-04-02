@@ -13,11 +13,13 @@ from app.db.session import get_db
 from app.services.audio import AudioValidator
 from app.services.confidence import ConfidencePolicy
 from app.services.repository import EmbeddingRepository, IntentRepository, UtteranceRepository
+from app.services.rerank import TwoStageIntentSearchService
 from app.services.similarity import SimilaritySearchService
 from app.services.storage import LocalStorageProvider
 from app.workers.pipeline import (
     InferencePipeline,
     build_embedding_provider,
+    build_reranker_provider,
     build_stt_provider,
 )
 
@@ -220,6 +222,33 @@ def search_intents(payload: IntentSearchRequest, db: Session = Depends(get_db)) 
             {
                 'intent_code': item.intent_code,
                 'score': item.score,
+            }
+            for item in candidates
+        ]
+    }
+
+
+@router.post('/v1/intents/search/rerank')
+def search_intents_rerank(
+    payload: IntentSearchRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, list[dict[str, str | float]]]:
+    query_text = _clean_required(payload.query, 'query')
+    embedding = pipeline.embedding_provider.embed(query_text).vector
+    reranker_provider = build_reranker_provider(settings)
+    two_stage_search = TwoStageIntentSearchService(db=db, reranker_provider=reranker_provider)
+    candidates = two_stage_search.top_k(
+        query=query_text,
+        embedding=embedding,
+        k=payload.k,
+        language_code=payload.language_hint,
+    )
+    return {
+        'items': [
+            {
+                'intent_code': item.intent_code,
+                'semantic_score': item.semantic_score,
+                'reranker_score': item.reranker_score,
             }
             for item in candidates
         ]
