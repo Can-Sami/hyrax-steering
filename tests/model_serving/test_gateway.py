@@ -26,6 +26,19 @@ def load_gateway_app(monkeypatch):
     fake_fw.WhisperModel = DummyWhisperModel
     monkeypatch.setitem(sys.modules, 'faster_whisper', fake_fw)
 
+    fake_qwen = types.ModuleType('qwen_asr')
+
+    class DummyQwenModel:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            return cls()
+
+        def transcribe(self, *args, **kwargs):
+            return [types.SimpleNamespace(text='qwen ok', language='tr')]
+
+    fake_qwen.Qwen3ASRModel = DummyQwenModel
+    monkeypatch.setitem(sys.modules, 'qwen_asr', fake_qwen)
+
     app_path = Path(__file__).resolve().parents[2] / 'model-serving' / 'gateway' / 'app.py'
     spec = importlib.util.spec_from_file_location(module_name, app_path)
     module = importlib.util.module_from_spec(spec)
@@ -85,13 +98,13 @@ def test_embeddings_accepts_model_field_and_ignores_it_for_cpu_backend(monkeypat
 
     response = client.post(
         '/v1/embeddings',
-        json={'input': 'hello', 'model': 'jinaai/jina-embeddings-v3'},
+        json={'input': 'hello', 'model': 'Qwen/Qwen3-Embedding-4B'},
         headers={'Authorization': f'Bearer {module.GATEWAY_API_KEY}'},
     )
 
     assert response.status_code == 200
     assert 'embeddings-cpu' in captured['url']
-    assert captured['json'] == {'input': 'hello', 'model': 'jinaai/jina-embeddings-v3'}
+    assert captured['json'] == {'input': 'hello', 'model': 'Qwen/Qwen3-Embedding-4B'}
 
 
 def test_embeddings_rejects_invalid_input_type_with_structured_error(monkeypatch) -> None:
@@ -198,7 +211,7 @@ def test_embeddings_invalid_backend_mode_rejected(monkeypatch) -> None:
 
 def test_embeddings_transformers_cpu_mode_targets_cpu_service(monkeypatch) -> None:
     monkeypatch.setenv('EMBEDDING_BACKEND_MODE', 'transformers_cpu')
-    monkeypatch.setenv('EMBEDDING_CPU_MODEL_NAME', 'jinaai/jina-embeddings-v3')
+    monkeypatch.setenv('EMBEDDING_CPU_MODEL_NAME', 'Qwen/Qwen3-Embedding-4B')
     module = load_gateway_app(monkeypatch)
 
     captured = {}
@@ -233,7 +246,7 @@ def test_embeddings_transformers_cpu_mode_targets_cpu_service(monkeypatch) -> No
     assert '/v1/embeddings' in captured['url']
     assert 'embeddings-cpu' in captured['url']
     assert captured['json'] == {'input': 'hello'}
-    assert response.json()['model'] == 'jinaai/jina-embeddings-v3'
+    assert response.json()['model'] == 'Qwen/Qwen3-Embedding-4B'
 
 
 def test_embeddings_vllm_mode_sends_configured_model(monkeypatch) -> None:
@@ -303,6 +316,22 @@ def test_transcriptions_oversized_audio_rejected(monkeypatch) -> None:
 
     assert response.status_code == 413
     assert response.json()['detail'] == 'Uploaded audio exceeds size limit.'
+
+
+def test_transcriptions_qwen_model_supported(monkeypatch) -> None:
+    monkeypatch.setenv('WHISPER_MODEL_NAME', 'Qwen/Qwen3-ASR-1.7B')
+    module = load_gateway_app(monkeypatch)
+    client = TestClient(module.app)
+
+    response = client.post(
+        '/v1/audio/transcriptions',
+        data={'model': module.DEFAULT_WHISPER_MODEL, 'language': 'tr'},
+        files={'file': ('sample.wav', b'RIFF', 'audio/wav')},
+        headers={'Authorization': f'Bearer {module.GATEWAY_API_KEY}'},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['text'] == 'qwen ok'
 
 
 def test_score_auth_required(monkeypatch) -> None:

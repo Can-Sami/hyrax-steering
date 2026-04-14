@@ -68,8 +68,8 @@ start_backend() {
     EMBEDDING_ENGINE="${EMBEDDING_ENGINE:-openai_compatible}" \
     OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8002/v1}" \
     OPENAI_API_KEY="${OPENAI_API_KEY:-local-dev-key}" \
-    WHISPER_MODEL_NAME="${WHISPER_MODEL_NAME:-openai/whisper-large-v3}" \
-    EMBEDDING_MODEL_NAME="${EMBEDDING_MODEL_NAME:-jinaai/jina-embeddings-v3}" \
+    WHISPER_MODEL_NAME="${WHISPER_MODEL_NAME:-Qwen/Qwen3-ASR-1.7B}" \
+    EMBEDDING_MODEL_NAME="${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-4B}" \
     API_KEY="$BACKEND_API_KEY" \
     "$ROOT_DIR/.venv/bin/uvicorn" app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" \
     >"$LOG_FILE" 2>&1 &

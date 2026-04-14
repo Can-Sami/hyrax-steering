@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 
-ENV EMBEDDING_CPU_MODEL_NAME=jinaai/jina-embeddings-v3
+ENV EMBEDDING_CPU_MODEL_NAME=Qwen/Qwen3-Embedding-4B
 ENV EMBEDDING_API_KEY=local-dev-key
 
 EXPOSE 8000

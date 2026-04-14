@@ -240,3 +240,93 @@ def test_rerank_search_propagates_reranker_error(monkeypatch) -> None:
         assert body['error']['code'] == 'reranker_engine_error'
     finally:
         app.dependency_overrides.clear()
+
+
+def test_infer_intent_records_stage_metrics(monkeypatch) -> None:
+    class _FakeRequestRecord:
+        def __init__(self) -> None:
+            self.id = uuid4()
+            self.processing_ms = None
+            self.updated_at = routes.datetime.now(routes.timezone.utc)
+
+    class _FakeInferenceRepository:
+        def __init__(self, db) -> None:
+            self.db = db
+            self.request_record = _FakeRequestRecord()
+
+        def get_intent_by_code(self, intent_code: str):
+            _ = intent_code
+            return None
+
+        def create_request(self, **kwargs):
+            _ = kwargs
+            return self.request_record
+
+        def create_result(self, **kwargs):
+            _ = kwargs
+            return None
+
+    class _FakeSimilaritySearchService:
+        def __init__(self, db) -> None:
+            self.db = db
+
+        def top_k(self, embedding, k: int = 5, language_code: str = 'tr'):
+            _ = (embedding, k, language_code)
+            return [IntentCandidate(intent_id=uuid4(), intent_code='billing', score=0.92)]
+
+    class _FakeConfidencePolicy:
+        @staticmethod
+        def evaluate(candidates):
+            _ = candidates
+            class _Result:
+                top_candidate = IntentCandidate(intent_id=uuid4(), intent_code='billing', score=0.92)
+                top_k = (IntentCandidate(intent_id=uuid4(), intent_code='billing', score=0.92),)
+                confidence = 0.92
+                is_low_confidence = False
+
+            return _Result()
+
+    class _FakeTelemetryRepository:
+        calls: list[tuple[object, list[dict[str, object]]]] = []
+
+        def __init__(self, db) -> None:
+            self.db = db
+
+        def create_stage_metrics(self, request_id, stage_rows):
+            self.calls.append((request_id, stage_rows))
+
+    class _FakePricingRepository:
+        def __init__(self, db) -> None:
+            self.db = db
+
+        def list_active_prices(self, **kwargs):
+            _ = kwargs
+            return []
+
+    monkeypatch.setattr(routes, 'InferenceRepository', _FakeInferenceRepository)
+    monkeypatch.setattr(routes, 'SimilaritySearchService', _FakeSimilaritySearchService)
+    monkeypatch.setattr(routes, 'confidence_policy', _FakeConfidencePolicy())
+    monkeypatch.setattr(routes, 'InferenceTelemetryRepository', _FakeTelemetryRepository)
+    monkeypatch.setattr(routes, 'InferencePricingRepository', _FakePricingRepository)
+    monkeypatch.setattr(routes.storage, 'store', lambda filename, content: f'/tmp/{filename}')
+
+    app.dependency_overrides[routes.get_db] = lambda: _FakeDb()
+    app.dependency_overrides[routes.require_api_key] = lambda: None
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            '/api/v1/inference/intent',
+            files={'audio_file': ('sample.wav', b'abc', 'audio/wav')},
+            data={'language_hint': 'tr'},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body['processing_ms'] >= 0
+        assert len(_FakeTelemetryRepository.calls) == 1
+        _, stage_rows = _FakeTelemetryRepository.calls[0]
+        stage_names = {item['stage_name'] for item in stage_rows}
+        assert {'stt', 'embedding', 'vector_search', 'rerank', 'confidence_policy', 'persistence', 'total'} <= stage_names
+    finally:
+        _FakeTelemetryRepository.calls.clear()
+        app.dependency_overrides.clear()

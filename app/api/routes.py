@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
@@ -13,9 +13,17 @@ from app.db.session import get_db
 from app.services.audio import AudioValidator
 from app.services.confidence import ConfidencePolicy
 from app.services.rerank import TwoStageIntentSearchService
-from app.services.repository import EmbeddingRepository, InferenceRepository, IntentRepository, UtteranceRepository
+from app.services.repository import (
+    EmbeddingRepository,
+    InferencePricingRepository,
+    InferenceRepository,
+    InferenceTelemetryRepository,
+    IntentRepository,
+    UtteranceRepository,
+)
 from app.services.similarity import SimilaritySearchService
 from app.services.storage import LocalStorageProvider
+from app.services.telemetry import InferenceTelemetryCollector, estimate_stage_cost
 from app.workers.pipeline import (
     InferencePipeline,
     build_embedding_provider,
@@ -85,6 +93,49 @@ def _parse_timeframe(start_at: str, end_at: str) -> tuple[datetime, datetime]:
     if parsed_start >= parsed_end:
         raise AppError(code='invalid_request', message='start_at must be earlier than end_at.', status_code=400)
     return parsed_start, parsed_end
+
+
+def _validate_max_window(start_at: datetime, end_at: datetime, *, max_days: int = 31) -> None:
+    if (end_at - start_at).days > max_days:
+        raise AppError(
+            code='invalid_request',
+            message=f'time window cannot exceed {max_days} days.',
+            status_code=400,
+        )
+
+
+def _stage_estimated_cost(
+    *,
+    pricing_repo: InferencePricingRepository,
+    provider: str | None,
+    model_name: str | None,
+    usage: dict[str, int | float | str],
+    at: datetime,
+) -> float | None:
+    if provider is None or model_name is None:
+        return None
+    try:
+        prices = pricing_repo.list_active_prices(provider=provider, model_name=model_name, at=at)
+    except SQLAlchemyError:
+        return None
+    estimated_costs = [
+        estimate_stage_cost(
+            usage=usage,
+            unit_type=price.unit_type,
+            unit_price_usd=price.unit_price_usd,
+        )
+        for price in prices
+    ]
+    valid_costs = [item for item in estimated_costs if item is not None]
+    if not valid_costs:
+        return None
+    return float(sum(valid_costs))
+
+
+def _error_code(exc: Exception) -> str:
+    if isinstance(exc, AppError):
+        return exc.code
+    return type(exc).__name__
 
 
 @router.get('/healthz')
@@ -382,32 +433,166 @@ async def infer_intent(
     db: Session = Depends(get_db),
 ) -> dict:
     repository = InferenceRepository(db)
+    pricing_repo = InferencePricingRepository(db)
+    telemetry_repo = InferenceTelemetryRepository(db)
+    collector = InferenceTelemetryCollector()
+    collector.start_stage('total')
     content = await audio_file.read()
     validator.validate(audio_file.filename or 'audio.wav', content)
     audio_uri = storage.store(audio_file.filename or 'audio.wav', content)
 
-    transcript, embedding = pipeline.run(audio_uri=audio_uri, language_code=language_hint)
+    collector.start_stage('stt')
+    try:
+        transcript_result = pipeline.stt_provider.transcribe(audio_uri=audio_uri, language_code=language_hint)
+        stt_usage: dict[str, int | float | str] = {
+            'request_count': 1,
+            'audio_bytes': len(content),
+        }
+        collector.end_stage(
+            'stt',
+            status='ok',
+            provider=settings.stt_engine,
+            model_name=settings.whisper_model_name,
+            usage=stt_usage,
+            estimated_cost_usd=_stage_estimated_cost(
+                pricing_repo=pricing_repo,
+                provider=settings.stt_engine,
+                model_name=settings.whisper_model_name,
+                usage=stt_usage,
+                at=datetime.now(timezone.utc),
+            ),
+        )
+    except Exception as exc:
+        collector.end_stage(
+            'stt',
+            status='error',
+            provider=settings.stt_engine,
+            model_name=settings.whisper_model_name,
+            usage={'request_count': 1},
+            error_code=_error_code(exc),
+            error_message=str(exc),
+        )
+        collector.end_stage(
+            'total',
+            status='error',
+            usage={'request_count': 1},
+            error_code=_error_code(exc),
+            error_message='stt_failed',
+        )
+        raise
+
+    collector.start_stage('embedding')
+    try:
+        embedding = pipeline.embedding_provider.embed(transcript_result.transcript).vector
+        embedding_usage: dict[str, int | float | str] = {
+            'request_count': 1,
+            'vector_dim': len(embedding),
+        }
+        collector.end_stage(
+            'embedding',
+            status='ok',
+            provider=settings.embedding_engine,
+            model_name=settings.embedding_model_name,
+            usage=embedding_usage,
+            estimated_cost_usd=_stage_estimated_cost(
+                pricing_repo=pricing_repo,
+                provider=settings.embedding_engine,
+                model_name=settings.embedding_model_name,
+                usage=embedding_usage,
+                at=datetime.now(timezone.utc),
+            ),
+        )
+    except Exception as exc:
+        collector.end_stage(
+            'embedding',
+            status='error',
+            provider=settings.embedding_engine,
+            model_name=settings.embedding_model_name,
+            usage={'request_count': 1},
+            error_code=_error_code(exc),
+            error_message=str(exc),
+        )
+        collector.end_stage(
+            'total',
+            status='error',
+            usage={'request_count': 1},
+            error_code=_error_code(exc),
+            error_message='embedding_failed',
+        )
+        raise
+
     similarity = SimilaritySearchService(db)
-    candidates = similarity.top_k(embedding=embedding, k=5, language_code=language_hint)
-    confidence_result = confidence_policy.evaluate(candidates)
+    collector.start_stage('vector_search')
+    try:
+        candidates = similarity.top_k(embedding=embedding, k=5, language_code=language_hint)
+        vector_usage: dict[str, int | float | str] = {
+            'request_count': 1,
+            'candidate_count': len(candidates),
+        }
+        collector.end_stage('vector_search', status='ok', usage=vector_usage)
+    except Exception as exc:
+        collector.end_stage(
+            'vector_search',
+            status='error',
+            usage={'request_count': 1},
+            error_code=_error_code(exc),
+            error_message=str(exc),
+        )
+        collector.end_stage(
+            'total',
+            status='error',
+            usage={'request_count': 1},
+            error_code=_error_code(exc),
+            error_message='vector_search_failed',
+        )
+        raise
+
+    collector.start_stage('rerank')
+    collector.end_stage(
+        'rerank',
+        status='skipped',
+        usage={'request_count': 0, 'reason': 'not_used_in_inference_endpoint'},
+    )
+
+    collector.start_stage('confidence_policy')
+    try:
+        confidence_result = confidence_policy.evaluate(candidates)
+        collector.end_stage('confidence_policy', status='ok', usage={'request_count': 1})
+    except Exception as exc:
+        collector.end_stage(
+            'confidence_policy',
+            status='error',
+            usage={'request_count': 1},
+            error_code=_error_code(exc),
+            error_message=str(exc),
+        )
+        collector.end_stage(
+            'total',
+            status='error',
+            usage={'request_count': 1},
+            error_code=_error_code(exc),
+            error_message='confidence_policy_failed',
+        )
+        raise
     match_status = 'low_confidence' if confidence_result.is_low_confidence else 'matched'
     top_intent = confidence_result.top_candidate
     top_candidates = [{'intent_code': candidate.intent_code, 'score': candidate.score} for candidate in confidence_result.top_k]
-    processing_ms = 120
     effective_request_id = request_id or str(uuid4())
     predicted_intent_id = None
     if match_status == 'matched' and top_intent is not None:
         matched_intent = repository.get_intent_by_code(top_intent.intent_code)
         predicted_intent_id = matched_intent.id if matched_intent is not None else None
 
+    total_ms = 0
     try:
+        collector.start_stage('persistence')
         inference_request = repository.create_request(
             external_request_id=effective_request_id,
             language_code=language_hint,
             audio_uri=audio_uri,
-            transcript=transcript,
+            transcript=transcript_result.transcript,
             status=match_status,
-            processing_ms=processing_ms,
+            processing_ms=None,
         )
         repository.create_result(
             request_id=inference_request.id,
@@ -415,8 +600,53 @@ async def infer_intent(
             confidence=confidence_result.confidence,
             top_k_json=top_candidates,
         )
+        persistence_usage: dict[str, int | float | str] = {'request_count': 1}
+        collector.end_stage(
+            'persistence',
+            status='ok',
+            usage=persistence_usage,
+            estimated_cost_usd=_stage_estimated_cost(
+                pricing_repo=pricing_repo,
+                provider='backend',
+                model_name='postgres',
+                usage=persistence_usage,
+                at=datetime.now(timezone.utc),
+            ),
+        )
+        collector.end_stage('total', status='ok', usage={'request_count': 1})
+        total_ms = next(
+            (int(item['duration_ms']) for item in collector.stage_rows() if item['stage_name'] == 'total'),
+            0,
+        )
+        inference_request.processing_ms = total_ms
+        inference_request.updated_at = datetime.now(timezone.utc)
         db.commit()
+        try:
+            telemetry_repo.create_stage_metrics(inference_request.id, collector.stage_rows())
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
     except IntegrityError as exc:
+        try:
+            collector.end_stage(
+                'persistence',
+                status='error',
+                usage={'request_count': 1},
+                error_code=_error_code(exc),
+                error_message='persistence_failed',
+            )
+        except KeyError:
+            pass
+        try:
+            collector.end_stage(
+                'total',
+                status='error',
+                usage={'request_count': 1},
+                error_code=_error_code(exc),
+                error_message='persistence_failed',
+            )
+        except KeyError:
+            pass
         db.rollback()
         raise AppError(code='invalid_request', message='Failed to persist inference result.', status_code=400) from exc
 
@@ -426,9 +656,9 @@ async def infer_intent(
         'intent_code': top_intent.intent_code if top_intent and match_status == 'matched' else None,
         'confidence': confidence_result.confidence,
         'match_status': match_status,
-        'transcript': transcript,
+        'transcript': transcript_result.transcript,
         'top_candidates': top_candidates,
-        'processing_ms': processing_ms,
+        'processing_ms': total_ms,
     }
 
 
@@ -458,3 +688,46 @@ def overview_recent_activity(
         raise AppError(code='invalid_request', message='limit must be between 1 and 50.', status_code=400)
     repository = InferenceRepository(db)
     return {'items': repository.recent_activity(parsed_start, parsed_end, limit)}
+
+
+@router.get('/v1/overview/stage-latency')
+def overview_stage_latency(
+    start_at: str,
+    end_at: str,
+    _: None = Depends(require_api_key),
+    db: Session = Depends(get_db),
+) -> dict[str, list[dict[str, object]]]:
+    parsed_start, parsed_end = _parse_timeframe(start_at, end_at)
+    _validate_max_window(parsed_start, parsed_end)
+    repository = InferenceRepository(db)
+    return {'items': repository.stage_latency(parsed_start, parsed_end)}
+
+
+@router.get('/v1/overview/stage-cost')
+def overview_stage_cost(
+    start_at: str,
+    end_at: str,
+    _: None = Depends(require_api_key),
+    db: Session = Depends(get_db),
+) -> dict[str, list[dict[str, object]]]:
+    parsed_start, parsed_end = _parse_timeframe(start_at, end_at)
+    _validate_max_window(parsed_start, parsed_end)
+    repository = InferenceRepository(db)
+    return {'items': repository.stage_cost(parsed_start, parsed_end)}
+
+
+@router.get('/v1/overview/benchmark-compare')
+def overview_benchmark_compare(
+    baseline_start_at: str,
+    baseline_end_at: str,
+    candidate_start_at: str,
+    candidate_end_at: str,
+    _: None = Depends(require_api_key),
+    db: Session = Depends(get_db),
+) -> dict[str, list[dict[str, object]]]:
+    baseline_start, baseline_end = _parse_timeframe(baseline_start_at, baseline_end_at)
+    candidate_start, candidate_end = _parse_timeframe(candidate_start_at, candidate_end_at)
+    _validate_max_window(baseline_start, baseline_end)
+    _validate_max_window(candidate_start, candidate_end)
+    repository = InferenceRepository(db)
+    return {'items': repository.benchmark_compare(baseline_start, baseline_end, candidate_start, candidate_end)}

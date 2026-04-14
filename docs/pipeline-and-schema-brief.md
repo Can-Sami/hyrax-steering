@@ -93,3 +93,30 @@ Related inference logging tables:
 - Think of `intents` as classes.
 - Think of `utterances` as training/index examples for those classes.
 - Search quality is mostly driven by utterance coverage/quality, language correctness, and embedding model quality.
+
+## 7) Runtime telemetry for latency/cost benchmarking
+
+Inference telemetry now tracks stage-level runtime and estimated cost so benchmark windows can be compared.
+
+Tracked stages:
+- `stt`
+- `embedding`
+- `vector_search`
+- `rerank` (currently marked `skipped` in semantic inference endpoint)
+- `confidence_policy`
+- `persistence`
+- `total`
+
+New tables:
+- `inference_stage_metrics`: one row per request/stage with `duration_ms`, provider/model metadata, usage JSON, status, and optional `estimated_cost_usd`.
+- `inference_cost_pricing`: versioned unit prices per provider/model (`token`, `audio_second`, `request`, `candidate`) used for runtime cost estimation.
+- `inference_metrics_rollup_hourly`: hourly aggregate structure for latency/cost dashboarding.
+
+Overview endpoints for benchmarking:
+- `GET /api/v1/overview/stage-latency`
+- `GET /api/v1/overview/stage-cost`
+- `GET /api/v1/overview/benchmark-compare`
+
+Primary benchmark KPIs:
+- per-stage p50/p95 latency
+- per-stage and total estimated cost per 1k requests

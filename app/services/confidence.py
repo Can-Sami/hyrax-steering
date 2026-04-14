@@ -2,7 +2,7 @@ from app.domain.schemas import ConfidenceResult, IntentCandidate
 
 
 class ConfidencePolicy:
-    def __init__(self, threshold: float = 0.65, min_margin: float = 0.05) -> None:
+    def __init__(self, threshold: float = 0.65, min_margin: float = 0.01) -> None:
         self.threshold = threshold
         self.min_margin = min_margin
 

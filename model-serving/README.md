@@ -43,12 +43,12 @@ export STT_ENGINE=openai_compatible
 export EMBEDDING_ENGINE=openai_compatible
 export OPENAI_BASE_URL=http://127.0.0.1:8002/v1
 export OPENAI_API_KEY=local-dev-key
-export WHISPER_MODEL_NAME=openai/whisper-large-v3
+export WHISPER_MODEL_NAME=Qwen/Qwen3-ASR-1.7B
 ```
 
 The embedding model variable depends on your chosen mode:
 - vLLM mode: `EMBEDDING_MODEL_NAME=BAAI/bge-small-en-v1.5` (or other vLLM-compatible models)
-- CPU mode: `EMBEDDING_CPU_MODEL_NAME=jinaai/jina-embeddings-v3`
+- CPU mode: `EMBEDDING_CPU_MODEL_NAME=Qwen/Qwen3-Embedding-4B`
 
 For production deployments, set `APP_ENV=production` and replace the default API keys with secure values for `GATEWAY_API_KEY` and `EMBEDDING_API_KEY`. If the embedding model is gated or private on Hugging Face, also set `HUGGING_FACE_HUB_TOKEN`.
 

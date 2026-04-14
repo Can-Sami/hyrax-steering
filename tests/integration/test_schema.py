@@ -12,6 +12,9 @@ def test_sqlalchemy_metadata_has_expected_tables() -> None:
         'inference_requests',
         'inference_results',
         'model_registry',
+        'inference_stage_metrics',
+        'inference_cost_pricing',
+        'inference_metrics_rollup_hourly',
     }
     assert expected_tables.issubset(set(Base.metadata.tables.keys()))
 
@@ -33,3 +36,11 @@ def test_latest_migration_adds_unique_constraint_for_inference_result_request() 
     migration_file = Path('alembic/versions/20260402_0003_add_unique_inference_result_request.py')
     content = migration_file.read_text(encoding='utf-8')
     assert "op.create_unique_constraint(\n        'uq_inference_results_request_id'" in content
+
+
+def test_telemetry_migration_defines_stage_metric_and_pricing_tables() -> None:
+    migration_file = Path('alembic/versions/20260405_0004_add_inference_telemetry_tables.py')
+    content = migration_file.read_text(encoding='utf-8')
+    assert "op.create_table(\n        'inference_stage_metrics'" in content
+    assert "op.create_table(\n        'inference_cost_pricing'" in content
+    assert "op.create_table(\n        'inference_metrics_rollup_hourly'" in content

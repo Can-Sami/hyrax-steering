@@ -30,6 +30,6 @@ spec:
                   name: callsteering-model-credentials
                   key: OPENAI_API_KEY
             - name: WHISPER_MODEL_NAME
-              value: openai/whisper-large-v3
+              value: Qwen/Qwen3-ASR-1.7B
             - name: EMBEDDING_MODEL_NAME
               value: Qwen/Qwen3-Embedding-8B

@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -113,3 +113,54 @@ class ModelRegistry(Base):
     __table_args__ = (
         UniqueConstraint('model_key', 'version', 'device_mode', name='uq_model_registry_key_version_device'),
     )
+
+
+class InferenceStageMetric(Base):
+    __tablename__ = 'inference_stage_metrics'
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    request_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('inference_requests.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    stage_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    usage_json: Mapped[dict | list] = mapped_column(JSONB, nullable=False)
+    estimated_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class InferenceCostPricing(Base):
+    __tablename__ = 'inference_cost_pricing'
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    unit_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    unit_price_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class InferenceMetricRollupHourly(Base):
+    __tablename__ = 'inference_metrics_rollup_hourly'
+
+    bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    stage_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    p50_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    p95_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    total_estimated_cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    cost_per_1k_requests: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -19,7 +19,7 @@ spec:
             - containerPort: 8000
           env:
             - name: WHISPER_MODEL_NAME
-              value: openai/whisper-large-v3
+              value: Qwen/Qwen3-ASR-1.7B
             - name: EMBEDDING_MODEL_NAME
               value: Qwen/Qwen3-Embedding-8B
             - name: WHISPER_DEVICE

@@ -1,10 +1,19 @@
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, Select
+from sqlalchemy import case, func, select, Select
 from sqlalchemy.orm import Session
 
-from app.db.models import InferenceRequest, InferenceResult, Intent, IntentEmbedding, IntentUtterance
+from app.db.models import (
+    InferenceCostPricing,
+    InferenceRequest,
+    InferenceResult,
+    InferenceStageMetric,
+    Intent,
+    IntentEmbedding,
+    IntentUtterance,
+)
 
 
 def _utc_now() -> datetime:
@@ -275,3 +284,178 @@ class InferenceRepository:
             }
             for row in rows
         ]
+
+    def stage_latency(self, start_at: datetime, end_at: datetime) -> list[dict[str, object]]:
+        rows = self.db.execute(
+            select(
+                InferenceStageMetric.stage_name,
+                func.count(InferenceStageMetric.id).label('request_count'),
+                func.sum(case((InferenceStageMetric.status == 'error', 1), else_=0)).label('error_count'),
+                func.percentile_cont(0.50).within_group(InferenceStageMetric.duration_ms).label('p50_ms'),
+                func.percentile_cont(0.95).within_group(InferenceStageMetric.duration_ms).label('p95_ms'),
+                func.avg(InferenceStageMetric.duration_ms).label('avg_ms'),
+            ).where(
+                InferenceStageMetric.created_at >= start_at,
+                InferenceStageMetric.created_at < end_at,
+            ).group_by(
+                InferenceStageMetric.stage_name,
+            ).order_by(
+                InferenceStageMetric.stage_name.asc(),
+            )
+        ).all()
+
+        return [
+            {
+                'stage_name': row.stage_name,
+                'request_count': int(row.request_count or 0),
+                'error_count': int(row.error_count or 0),
+                'p50_ms': float(row.p50_ms or 0.0),
+                'p95_ms': float(row.p95_ms or 0.0),
+                'avg_ms': float(row.avg_ms or 0.0),
+            }
+            for row in rows
+        ]
+
+    def stage_cost(self, start_at: datetime, end_at: datetime) -> list[dict[str, object]]:
+        rows = self.db.execute(
+            select(
+                InferenceStageMetric.stage_name,
+                func.count(InferenceStageMetric.id).label('request_count'),
+                func.sum(func.coalesce(InferenceStageMetric.estimated_cost_usd, 0.0)).label('total_estimated_cost_usd'),
+            ).where(
+                InferenceStageMetric.created_at >= start_at,
+                InferenceStageMetric.created_at < end_at,
+            ).group_by(
+                InferenceStageMetric.stage_name,
+            ).order_by(
+                InferenceStageMetric.stage_name.asc(),
+            )
+        ).all()
+
+        items: list[dict[str, object]] = []
+        for row in rows:
+            request_count = int(row.request_count or 0)
+            total_cost = float(row.total_estimated_cost_usd or 0.0)
+            cost_per_1k = (total_cost / request_count * 1000.0) if request_count else 0.0
+            items.append(
+                {
+                    'stage_name': row.stage_name,
+                    'request_count': request_count,
+                    'total_estimated_cost_usd': total_cost,
+                    'cost_per_1k_requests': cost_per_1k,
+                }
+            )
+        return items
+
+    def benchmark_compare(
+        self,
+        baseline_start: datetime,
+        baseline_end: datetime,
+        candidate_start: datetime,
+        candidate_end: datetime,
+    ) -> list[dict[str, object]]:
+        baseline_latency = {item['stage_name']: item for item in self.stage_latency(baseline_start, baseline_end)}
+        baseline_cost = {item['stage_name']: item for item in self.stage_cost(baseline_start, baseline_end)}
+        candidate_latency = {item['stage_name']: item for item in self.stage_latency(candidate_start, candidate_end)}
+        candidate_cost = {item['stage_name']: item for item in self.stage_cost(candidate_start, candidate_end)}
+
+        all_stage_names = sorted(
+            set(baseline_latency.keys())
+            | set(baseline_cost.keys())
+            | set(candidate_latency.keys())
+            | set(candidate_cost.keys())
+        )
+        items: list[dict[str, object]] = []
+        for stage_name in all_stage_names:
+            baseline_p95 = float(baseline_latency.get(stage_name, {}).get('p95_ms', 0.0))
+            candidate_p95 = float(candidate_latency.get(stage_name, {}).get('p95_ms', 0.0))
+            baseline_cost_per_1k = float(baseline_cost.get(stage_name, {}).get('cost_per_1k_requests', 0.0))
+            candidate_cost_per_1k = float(candidate_cost.get(stage_name, {}).get('cost_per_1k_requests', 0.0))
+            items.append(
+                {
+                    'stage_name': stage_name,
+                    'baseline_p95_ms': baseline_p95,
+                    'candidate_p95_ms': candidate_p95,
+                    'p95_delta_pct': self._delta_pct(candidate_p95, baseline_p95),
+                    'baseline_cost_per_1k_requests': baseline_cost_per_1k,
+                    'candidate_cost_per_1k_requests': candidate_cost_per_1k,
+                    'cost_per_1k_delta_pct': self._delta_pct(candidate_cost_per_1k, baseline_cost_per_1k),
+                }
+            )
+        return items
+
+
+class InferenceTelemetryRepository:
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def create_stage_metrics(self, request_id: UUID | str, stage_rows: list[dict[str, Any]]) -> None:
+        if not hasattr(self.db, 'add') or not hasattr(self.db, 'flush'):
+            return
+        now = _utc_now()
+        for row in stage_rows:
+            metric = InferenceStageMetric(
+                request_id=request_id,
+                stage_name=str(row['stage_name']),
+                started_at=row['started_at'],
+                finished_at=row['finished_at'],
+                duration_ms=int(row['duration_ms']),
+                provider=row.get('provider'),
+                model_name=row.get('model_name'),
+                usage_json=row.get('usage_json') or {},
+                estimated_cost_usd=row.get('estimated_cost_usd'),
+                status=str(row['status']),
+                error_code=row.get('error_code'),
+                error_message=row.get('error_message'),
+                created_at=now,
+            )
+            self.db.add(metric)
+        self.db.flush()
+
+
+class InferencePricingRepository:
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def get_active_price(
+        self,
+        *,
+        provider: str,
+        model_name: str,
+        unit_type: str,
+        at: datetime,
+    ) -> InferenceCostPricing | None:
+        if not hasattr(self.db, 'scalar'):
+            return None
+        return self.db.scalar(
+            select(InferenceCostPricing)
+            .where(
+                InferenceCostPricing.provider == provider,
+                InferenceCostPricing.model_name == model_name,
+                InferenceCostPricing.unit_type == unit_type,
+                InferenceCostPricing.effective_from <= at,
+                func.coalesce(InferenceCostPricing.effective_to, at) >= at,
+            )
+            .order_by(InferenceCostPricing.effective_from.desc())
+            .limit(1)
+        )
+
+    def list_active_prices(
+        self,
+        *,
+        provider: str,
+        model_name: str,
+        at: datetime,
+    ) -> list[InferenceCostPricing]:
+        if not hasattr(self.db, 'scalars'):
+            return []
+        return list(
+            self.db.scalars(
+                select(InferenceCostPricing).where(
+                    InferenceCostPricing.provider == provider,
+                    InferenceCostPricing.model_name == model_name,
+                    InferenceCostPricing.effective_from <= at,
+                    func.coalesce(InferenceCostPricing.effective_to, at) >= at,
+                )
+            ).all()
+        )

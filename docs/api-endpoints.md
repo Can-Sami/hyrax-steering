@@ -257,11 +257,14 @@ curl -s -X POST http://localhost:18000/api/v1/inference/intent \
 
 Overview metrics are aggregated server-side from persisted inference data (`inference_requests` + `inference_results`) and filtered by explicit timeframe.
 
+Telemetry metrics are aggregated from `inference_stage_metrics`.
+
 ### Time filter parameters
 
 - `start_at` (required): ISO timestamp (for example `2026-04-01T10:00:00Z`)
 - `end_at` (required): ISO timestamp
 - Rule: `start_at < end_at`
+- For stage telemetry endpoints, max window is `31 days`.
 
 ### `GET /api/v1/overview/summary`
 Returns total inferences, average confidence, and previous-window delta percentages.
@@ -322,6 +325,101 @@ curl -s "http://localhost:18000/api/v1/overview/recent-activity?start_at=2026-04
       "input_snippet": "temsilciye bagla",
       "predicted_intent": null,
       "confidence": 0.42
+    }
+  ]
+}
+```
+
+### `GET /api/v1/overview/stage-latency`
+Returns per-stage latency KPIs for the window (`p50_ms`, `p95_ms`, `avg_ms`) plus request/error counts.
+
+Auth: if `API_KEY` is configured, send header `x-api-key: <key>`.
+
+```bash
+curl -s "http://localhost:18000/api/v1/overview/stage-latency?start_at=2026-04-01T10:00:00Z&end_at=2026-04-01T12:00:00Z" \
+  -H "x-api-key: local-dev-key"
+```
+
+```json
+{
+  "items": [
+    {
+      "stage_name": "embedding",
+      "request_count": 128,
+      "error_count": 0,
+      "p50_ms": 23.0,
+      "p95_ms": 41.0,
+      "avg_ms": 25.5
+    },
+    {
+      "stage_name": "total",
+      "request_count": 128,
+      "error_count": 2,
+      "p50_ms": 98.0,
+      "p95_ms": 176.0,
+      "avg_ms": 108.4
+    }
+  ]
+}
+```
+
+### `GET /api/v1/overview/stage-cost`
+Returns per-stage estimated cost totals and normalized cost per 1k requests.
+
+Auth: if `API_KEY` is configured, send header `x-api-key: <key>`.
+
+```bash
+curl -s "http://localhost:18000/api/v1/overview/stage-cost?start_at=2026-04-01T10:00:00Z&end_at=2026-04-01T12:00:00Z" \
+  -H "x-api-key: local-dev-key"
+```
+
+```json
+{
+  "items": [
+    {
+      "stage_name": "stt",
+      "request_count": 128,
+      "total_estimated_cost_usd": 0.42,
+      "cost_per_1k_requests": 3.28125
+    },
+    {
+      "stage_name": "embedding",
+      "request_count": 128,
+      "total_estimated_cost_usd": 0.19,
+      "cost_per_1k_requests": 1.484375
+    }
+  ]
+}
+```
+
+### `GET /api/v1/overview/benchmark-compare`
+Compares two windows (baseline vs candidate) for each stage and returns p95/cost deltas.
+
+Auth: if `API_KEY` is configured, send header `x-api-key: <key>`.
+
+Query params:
+- `baseline_start_at` (required)
+- `baseline_end_at` (required)
+- `candidate_start_at` (required)
+- `candidate_end_at` (required)
+- Rule: each window must be `< 31 days` and have `start < end`
+
+```bash
+curl -s "http://localhost:18000/api/v1/overview/benchmark-compare?baseline_start_at=2026-04-01T08:00:00Z&baseline_end_at=2026-04-01T10:00:00Z&candidate_start_at=2026-04-01T10:00:00Z&candidate_end_at=2026-04-01T12:00:00Z" \
+  -H "x-api-key: local-dev-key"
+```
+
+```json
+{
+  "items": [
+    {
+      "stage_name": "embedding",
+      "baseline_p95_ms": 46.0,
+      "candidate_p95_ms": 41.0,
+      "p95_delta_pct": -10.869565217391305,
+      "baseline_cost_per_1k_requests": 1.61,
+      "candidate_cost_per_1k_requests": 1.48,
+      "cost_per_1k_delta_pct": -8.074534161490684
     }
   ]
 }

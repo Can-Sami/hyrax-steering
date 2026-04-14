@@ -34,12 +34,12 @@ export OPENAI_API_KEY=local-dev-key
 export RERANKER_BASE_URL=   # optional; defaults to OPENAI_BASE_URL when empty
 export RERANKER_API_KEY=    # optional; defaults to OPENAI_API_KEY when empty
 export RERANKER_MODEL_NAME=BAAI/bge-reranker-v2-m3
-export WHISPER_MODEL_NAME=openai/whisper-large-v3
+export WHISPER_MODEL_NAME=Qwen/Qwen3-ASR-1.7B
 ```
 
 Set the embedding model variable to match your chosen mode:
 - vLLM mode: `export EMBEDDING_MODEL_NAME=BAAI/bge-small-en-v1.5`
-- CPU mode: `export EMBEDDING_CPU_MODEL_NAME=jinaai/jina-embeddings-v3`
+- CPU mode: `export EMBEDDING_CPU_MODEL_NAME=Qwen/Qwen3-Embedding-4B`
 
 For production deployments, set `APP_ENV=production` and use secure values for `GATEWAY_API_KEY` and `EMBEDDING_API_KEY`. If the embedding model is gated or private on Hugging Face, also export `HUGGING_FACE_HUB_TOKEN` before starting the stack.
 

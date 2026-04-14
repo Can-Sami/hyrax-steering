@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
@@ -25,9 +26,11 @@ APP_ENV = os.getenv('APP_ENV', 'dev')
 EMBEDDING_API_KEY = os.getenv('EMBEDDING_API_KEY', 'local-dev-key')
 GATEWAY_API_KEY = os.getenv('GATEWAY_API_KEY', 'local-dev-key')
 DEFAULT_EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL_NAME', 'Qwen/Qwen3-Embedding-8B')
-DEFAULT_WHISPER_MODEL = os.getenv('WHISPER_MODEL_NAME', 'openai/whisper-large-v3')
+DEFAULT_WHISPER_MODEL = os.getenv('WHISPER_MODEL_NAME', 'Qwen/Qwen3-ASR-1.7B')
 WHISPER_DEVICE = os.getenv('WHISPER_DEVICE', 'cpu')
 WHISPER_COMPUTE_TYPE = os.getenv('WHISPER_COMPUTE_TYPE', 'int8')
+QWEN_ASR_DEVICE_MAP = os.getenv('QWEN_ASR_DEVICE_MAP', 'cpu')
+QWEN_ASR_DTYPE = os.getenv('QWEN_ASR_DTYPE', 'float32')
 MAX_UPLOAD_BYTES = int(os.getenv('MAX_UPLOAD_BYTES', str(25 * 1024 * 1024)))
 UPLOAD_CHUNK_SIZE = int(os.getenv('UPLOAD_CHUNK_SIZE', str(1024 * 1024)))
 MAX_SCORE_QUERY_CHARS = int(os.getenv('MAX_SCORE_QUERY_CHARS', '4096'))
@@ -42,6 +45,7 @@ WHISPER_MODEL_ALIASES: dict[str, str] = {
 
 
 _whisper: WhisperModel | None = None
+_qwen_asr_model: Any | None = None
 
 
 def is_default_key(value: str) -> bool:
@@ -67,9 +71,29 @@ def get_whisper_model() -> WhisperModel:
     return _whisper
 
 
+def is_qwen_asr_model(model_name: str) -> bool:
+    return model_name.strip().lower().startswith('qwen/qwen3-asr')
+
+
+def get_qwen_asr_model() -> Any:
+    global _qwen_asr_model
+    if _qwen_asr_model is None:
+        try:
+            from qwen_asr import Qwen3ASRModel
+        except ImportError as exc:
+            raise RuntimeError('qwen_asr package is required for Qwen3-ASR models.') from exc
+
+        _qwen_asr_model = Qwen3ASRModel.from_pretrained(
+            DEFAULT_WHISPER_MODEL,
+            device_map=QWEN_ASR_DEVICE_MAP,
+            dtype=QWEN_ASR_DTYPE,
+        )
+    return _qwen_asr_model
+
+
 def get_backend_model_name(backend_name: str) -> str:
     if backend_name == 'transformers_cpu':
-        return os.getenv('EMBEDDING_CPU_MODEL_NAME', 'jinaai/jina-embeddings-v3')
+        return os.getenv('EMBEDDING_CPU_MODEL_NAME', 'Qwen/Qwen3-Embedding-4B')
     return DEFAULT_EMBEDDING_MODEL
 
 
@@ -228,9 +252,16 @@ async def transcriptions(
         if model_name != DEFAULT_WHISPER_MODEL:
             raise HTTPException(status_code=400, detail=f'Only model {DEFAULT_WHISPER_MODEL} is supported by this gateway.')
 
-        whisper = get_whisper_model()
-        segments, _ = whisper.transcribe(temp_path, language=language)
-        text = ' '.join(segment.text.strip() for segment in segments).strip()
+        if is_qwen_asr_model(model_name):
+            qwen_model = get_qwen_asr_model()
+            results = qwen_model.transcribe(audio=temp_path, language=_qwen_language(language))
+            if not results:
+                raise RuntimeError('Qwen ASR returned no transcription results.')
+            text = str(getattr(results[0], 'text', '')).strip()
+        else:
+            whisper = get_whisper_model()
+            segments, _ = whisper.transcribe(temp_path, language=language)
+            text = ' '.join(segment.text.strip() for segment in segments).strip()
         return {'text': text}
     except OSError as exc:
         raise HTTPException(status_code=500, detail='Could not process uploaded audio.') from exc
@@ -239,6 +270,24 @@ async def transcriptions(
     finally:
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
+
+
+def _qwen_language(language: str | None) -> str | None:
+    if language is None:
+        return None
+    normalized = language.strip().lower()
+    if not normalized:
+        return None
+    mapping = {
+        'tr': 'Turkish',
+        'en': 'English',
+        'zh': 'Chinese',
+        'yue': 'Cantonese',
+        'de': 'German',
+        'fr': 'French',
+        'es': 'Spanish',
+    }
+    return mapping.get(normalized, language)
 
 
 @app.post('/v1/score')

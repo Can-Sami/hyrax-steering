@@ -16,7 +16,7 @@ app = FastAPI(title="CPU Embeddings Service")
 security = HTTPBearer()
 
 model = None
-model_name = os.getenv("EMBEDDING_CPU_MODEL_NAME", "jinaai/jina-embeddings-v3")
+model_name = os.getenv("EMBEDDING_CPU_MODEL_NAME", "Qwen/Qwen3-Embedding-4B")
 api_key = os.getenv("EMBEDDING_API_KEY", "local-dev-key")
 max_batch_size = int(os.getenv("EMBEDDING_MAX_BATCH_SIZE", "128"))
 max_input_chars = int(os.getenv("EMBEDDING_MAX_INPUT_CHARS", "8192"))
